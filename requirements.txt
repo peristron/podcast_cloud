@@ -1,0 +1,8 @@
+streamlit
+groq
+edge-tts
+pydub
+python-docx
+PyPDF2
+beautifulsoup4
+requests
