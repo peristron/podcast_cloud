@@ -198,11 +198,19 @@ with tab1:
                 client = OpenAI(api_key=api_key)
                 
                 # Determine Length Instructions
-                length_instr = "12-15 exchanges (approx 2-3 mins)"
+                length_instr = "12-15 exchanges (approx 2-3 mins). Keep it punchy."
+                
                 if "Medium" in length_option:
-                    length_instr = "25-30 exchanges (approx 5-7 mins). Go deep into details."
+                    length_instr = "30 exchanges. Go deep into details. Use analogies to explain complex points."
                 elif "Long" in length_option:
-                    length_instr = "45-50 exchanges (approx 15 mins). Extensive discussion."
+                    # FORCE VERBOSITY
+                    length_instr = """
+                    At least 50 exchanges. This must be a Deep Dive. 
+                    Do not summarize quickly. 
+                    Host 2 should ask for specific examples. 
+                    Host 1 should give long, detailed explanations. 
+                    Expand on every point in the source text significantly.
+                    """
 
                 prompt = f"""
                 Create a podcast script based on the source text.
@@ -320,3 +328,4 @@ with tab3:
                     with open(out_file, "rb") as f:
                         st.download_button("💾 Download MP3", f, "podcast_master.mp3")
                     status.success("Production Complete!")
+
