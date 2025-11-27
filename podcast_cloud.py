@@ -17,6 +17,7 @@ from datetime import datetime
 # --- TEXT PROCESSING ---
 import PyPDF2
 import docx
+from pptx import Presentation # NEW: PowerPoint Support
 from bs4 import BeautifulSoup
 import yt_dlp
 
@@ -40,8 +41,6 @@ if "source_text" not in st.session_state:
     st.session_state.source_text = ""
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
-if "video_text_cache" not in st.session_state:
-    st.session_state.video_text_cache = ""
 
 # ================= AUTHENTICATION =================
 def check_password():
@@ -90,16 +89,30 @@ def extract_text_from_files(files, client=None):
     for file in files:
         try:
             name = file.name.lower()
-            # Document Handling
+            
+            # 1. PDF
             if name.endswith(".pdf"):
                 reader = PyPDF2.PdfReader(file)
                 for page in reader.pages: text += page.extract_text() + "\n"
+            
+            # 2. Word (DOCX)
             elif name.endswith(".docx"):
                 doc = docx.Document(file)
                 for para in doc.paragraphs: text += para.text + "\n"
+            
+            # 3. PowerPoint (PPTX) - NEW
+            elif name.endswith(".pptx"):
+                prs = Presentation(file)
+                for slide in prs.slides:
+                    for shape in slide.shapes:
+                        if hasattr(shape, "text"):
+                            text += shape.text + "\n"
+                            
+            # 4. Text Files
             elif name.endswith(".txt"):
                 text = file.getvalue().decode("utf-8")
-            # Audio/Video Handling (Whisper)
+            
+            # 5. Audio/Video (Whisper)
             elif name.endswith((".mp3", ".mp4", ".wav", ".m4a", ".mpeg", ".webm")):
                 if client:
                     with st.spinner(f"Transcribing {name}..."):
@@ -113,8 +126,16 @@ def extract_text_from_files(files, client=None):
                             )
                         text += transcript.text + "\n"
                         os.remove(tmp_path)
+                else:
+                    st.warning(f"⚠️ Skipped {file.name}: API Key required for audio transcription.")
+
+            # 6. Unsupported File Type - NEW Error Messaging
+            else:
+                st.warning(f"⚠️ Skipped {file.name}: Unsupported file format. Supported: PDF, DOCX, PPTX, TXT, MP3, MP4.")
+
         except Exception as e:
-            st.error(f"Error reading {file.name}: {e}")
+            st.error(f"Error processing {file.name}: {e}")
+            
     return text
 
 def download_and_transcribe_video(url, client):
@@ -144,7 +165,7 @@ def download_and_transcribe_video(url, client):
             audio_path = os.path.join(tmp_dir, "audio.mp3")
             
             if not os.path.exists(audio_path):
-                return None, "Download failed (Blocked)."
+                return None, "Download failed. Blocked by website."
 
             if os.path.getsize(audio_path) / (1024 * 1024) > 24:
                 return None, "Audio too large (>25MB)."
@@ -191,7 +212,7 @@ with st.sidebar:
 
     st.divider()
 
-    # --- LANGUAGE SUPPORT (RESTORED FULL LIST) ---
+    # --- LANGUAGE SUPPORT ---
     st.subheader("🌍 Localization")
     language_options = [
         "English (US)", "English (UK)", "Spanish (Spain)", "Spanish (LatAm)", 
@@ -262,13 +283,13 @@ with tab1:
     st.info("Upload content here. This drives both the **Podcast** and the **Chatbot**.")
     input_type = st.radio(
         "Select Input", 
-        ["📂 Upload Files (PDF/Docs/Audio/Video)", "🔗 Web URL", "📺 Video URL (Download)", "📝 Paste Text"], 
+        ["📂 Upload Files (PDF/PPTX/Docs/Audio/Video)", "🔗 Web URL", "📺 Video URL (Download)", "📝 Paste Text"], 
         horizontal=True
     )
     
     new_text = ""
     
-    if input_type == "📂 Upload Files (PDF/Docs/Audio/Video)":
+    if input_type == "📂 Upload Files (PDF/PPTX/Docs/Audio/Video)":
         files = st.file_uploader("Upload Files", accept_multiple_files=True)
         if files: 
             if st.button("Process Uploaded Files"):
@@ -392,7 +413,6 @@ with tab3:
                     
                     if privacy_mode:
                         st.session_state.source_text = ""
-                        st.session_state.video_text_cache = ""
                         st.info("🛡️ Privacy Mode: Source text cleared from memory.")
                         
             except Exception as e: st.error(f"Error: {e}")
@@ -482,4 +502,5 @@ with tab4:
                     status.success("Production Complete!")
                     st.audio(audio_bytes, format="audio/mp3")
                     st.download_button(label="💾 Download MP3", data=audio_bytes, file_name="podcast_master.mp3", mime="audio/mp3")
+
 
