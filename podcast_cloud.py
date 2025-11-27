@@ -12,7 +12,6 @@ import shutil
 import re
 from pathlib import Path
 from pydub import AudioSegment
-from pydub.effects import high_pass_filter, low_pass_filter
 from datetime import datetime
 
 # --- TEXT PROCESSING ---
@@ -61,6 +60,21 @@ if not st.session_state.authenticated:
 
 # ================= UTILS =================
 
+def get_llm_client(model_selection, openai_key, xai_key):
+    """
+    Returns the appropriate client and model string based on selection.
+    Model A = OpenAI (gpt-4o-mini)
+    Model B = xAI (grok-beta)
+    """
+    if model_selection == "Model A":
+        if not openai_key: return None, None, "Missing OpenAI API Key"
+        return OpenAI(api_key=openai_key), "gpt-4o-mini", None
+    elif model_selection == "Model B":
+        if not xai_key: return None, None, "Missing xAI API Key"
+        # xAI uses the OpenAI SDK but with a different Base URL
+        return OpenAI(api_key=xai_key, base_url="https://api.x.ai/v1"), "grok-beta", None
+    return None, None, "Invalid Selection"
+
 def download_file_with_headers(url, save_path):
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
@@ -83,7 +97,7 @@ def scrape_website(url):
         return soup.get_text()
     except: return None
 
-def extract_text_from_files(files, client=None):
+def extract_text_from_files(files, audio_client=None):
     text = ""
     for file in files:
         try:
@@ -102,24 +116,25 @@ def extract_text_from_files(files, client=None):
             elif name.endswith(".txt"):
                 text = file.getvalue().decode("utf-8")
             elif name.endswith((".mp3", ".mp4", ".wav", ".m4a", ".mpeg", ".webm")):
-                if client:
+                # Must use OpenAI for Whisper (xAI doesn't support audio yet)
+                if audio_client:
                     with st.spinner(f"Transcribing {name}..."):
                         with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(name)[1]) as tmp_file:
                             tmp_file.write(file.getvalue())
                             tmp_path = tmp_file.name
                         with open(tmp_path, "rb") as audio_file:
-                            transcript = client.audio.transcriptions.create(model="whisper-1", file=audio_file)
+                            transcript = audio_client.audio.transcriptions.create(model="whisper-1", file=audio_file)
                         text += transcript.text + "\n"
                         os.remove(tmp_path)
                 else:
-                    st.warning(f"Skipped {file.name}: API Key required.")
+                    st.warning(f"Skipped {file.name}: OpenAI Key required for Audio transcription.")
             else:
                 st.warning(f"Skipped {file.name}: Unsupported format.")
         except Exception as e:
             st.error(f"Error reading {file.name}: {e}")
     return text
 
-def download_and_transcribe_video(url, client):
+def download_and_transcribe_video(url, audio_client):
     try:
         with tempfile.TemporaryDirectory() as tmp_dir:
             ydl_opts = {
@@ -134,7 +149,7 @@ def download_and_transcribe_video(url, client):
             if not os.path.exists(audio_path): return None, "Download failed."
             if os.path.getsize(audio_path) / (1024*1024) > 24: return None, "Video too long (>25MB)."
             with open(audio_path, "rb") as f:
-                transcript = client.audio.transcriptions.create(model="whisper-1", file=f)
+                transcript = audio_client.audio.transcriptions.create(model="whisper-1", file=f)
             return transcript.text, None
     except Exception as e: return None, str(e)
 
@@ -149,7 +164,13 @@ def generate_audio_openai(client, text, voice, filename, speed=1.0):
 
 with st.sidebar:
     st.title("🎛️ Studio Settings")
-    api_key = st.secrets.get("OPENAI_API_KEY") or st.text_input("OpenAI API Key", type="password")
+    
+    # KEYS FOR BOTH MODELS
+    openai_key = st.secrets.get("OPENAI_API_KEY") or st.text_input("OpenAI API Key", type="password")
+    xai_key = st.secrets.get("XAI_API_KEY") or st.text_input("xAI API Key (Optional)", type="password")
+    
+    # MODEL SELECTOR (MASKED)
+    model_choice = st.radio("Intelligence Engine", ["Model A", "Model B"], help="Model A = Standard, Model B = Alternative Logic")
     
     privacy_mode = st.toggle("🛡️ Privacy Mode", value=False)
     
@@ -184,7 +205,8 @@ with st.sidebar:
     st.subheader("🎵 Music & Branding")
     
     bg_source = st.radio("Background Music", ["Presets", "Upload Custom", "None"], horizontal=True)
-    music_ramp_up = st.checkbox("🎵 Start Music 5s Before Dialogue", value=False)
+    
+    music_ramp_up = st.checkbox("🎵 Start Music 5s Before Dialogue", value=False, help="Creates a 'Cold Open' effect using the background music.")
 
     selected_bg_url = None
     uploaded_bg_file = None
@@ -215,12 +237,14 @@ with tab1:
     input_type = st.radio("Input Type", ["📂 Files", "🔗 Web URL", "📺 Video URL", "📝 Text"], horizontal=True)
     new_text = ""
     
+    # Always initialize OpenAI client for Audio Transcriptions (Whisper), regardless of Script Writer choice
+    audio_client = OpenAI(api_key=openai_key) if openai_key else None
+
     if input_type == "📂 Files":
         files = st.file_uploader("Upload", accept_multiple_files=True)
         if files and st.button("Process Files"):
             with st.spinner("Processing uploaded files..."):
-                client = OpenAI(api_key=api_key) if api_key else None
-                new_text = extract_text_from_files(files, client)
+                new_text = extract_text_from_files(files, audio_client)
             
     elif input_type == "🔗 Web URL":
         url = st.text_input("Enter Article URL")
@@ -233,13 +257,12 @@ with tab1:
     elif input_type == "📺 Video URL":
         vid_url = st.text_input("Enter Video URL")
         if vid_url and st.button("Transcribe"):
-            if api_key:
-                client = OpenAI(api_key=api_key)
+            if audio_client:
                 with st.spinner("Downloading and Transcribing Video..."):
-                    text, err = download_and_transcribe_video(vid_url, client)
+                    text, err = download_and_transcribe_video(vid_url, audio_client)
                     if text: new_text = text
                     else: st.error(err)
-            else: st.error("API Key Required")
+            else: st.error("OpenAI API Key Required for Transcription (even if using Model B for scripts).")
     
     elif input_type == "📝 Text":
         new_text = st.text_area("Paste Text", height=300)
@@ -255,30 +278,39 @@ with tab1:
         with st.expander("View Source Text"):
             st.text_area("Content", st.session_state.source_text, height=150, disabled=True)
 
-# --- TAB 2: CHAT ---
+# --- TAB 2: CHAT & NOTEBOOK ---
 with tab2:
     col_chat, col_notes = st.columns([1, 1])
+    
     with col_chat:
         st.subheader("💬 Active Chat")
-        if not st.session_state.source_text: st.warning("Load source text first.")
+        if not st.session_state.source_text:
+            st.warning("Load source text first.")
         else:
             for message in st.session_state.chat_history:
                 with st.chat_message(message["role"]): st.markdown(message["content"])
+            
             if prompt := st.chat_input("Ask a question..."):
-                if api_key:
+                # Get the correct client (OpenAI or xAI)
+                llm_client, llm_model, err = get_llm_client(model_choice, openai_key, xai_key)
+                
+                if err:
+                    st.error(err)
+                else:
                     st.session_state.chat_history.append({"role": "user", "content": prompt})
                     st.session_state.notebook_content += f"**Q:** {prompt}\n\n"
                     with st.chat_message("user"): st.markdown(prompt)
+                    
                     with st.chat_message("assistant"):
-                        client = OpenAI(api_key=api_key)
-                        stream = client.chat.completions.create(
-                            model="gpt-4o-mini",
+                        stream = llm_client.chat.completions.create(
+                            model=llm_model,
                             messages=[
                                 {"role": "system", "content": "Answer based ONLY on source text."},
                                 {"role": "user", "content": f"Source: {st.session_state.source_text[:30000]}"},
                                 {"role": "user", "content": prompt}
                             ], stream=True)
                         response = st.write_stream(stream)
+                    
                     st.session_state.chat_history.append({"role": "assistant", "content": response})
                     st.session_state.notebook_content += f"**A:** {response}\n\n"
                     st.rerun()
@@ -296,60 +328,53 @@ with tab3:
     col_dir, col_call = st.columns([1, 1])
     
     with col_dir:
-        user_instructions = st.text_area(
-            "📢 Custom Instructions", 
-            placeholder="e.g., 'Focus on the financial aspects', 'Make it funny'"
-        )
-        
+        user_instructions = st.text_area("📢 Custom Instructions", placeholder="e.g., 'Focus on financials', 'Make it funny'")
     with col_call:
         st.markdown("#### 📞 Call-in Segment")
-        caller_prompt = st.text_area(
-            "Listener Question/Comment",
-            placeholder="Type a question here. E.g., 'Hey, I disagree with your point about X...'"
-        )
-        st.caption("If filled, a 'Caller' will interrupt the show with this question.")
+        caller_prompt = st.text_area("Listener Question", placeholder="Type a question for a 'Caller' to ask...")
 
     if st.button("Generate Podcast Script", type="primary"):
-        if not api_key or not st.session_state.source_text: st.error("Missing Key or Text")
+        if not st.session_state.source_text: 
+            st.error("No source text loaded.")
         else:
-            try:
-                client = OpenAI(api_key=api_key)
-                length_instr = "12-15 exchanges"
-                if "Medium" in length_option: length_instr = "30 exchanges. Deep dive."
-                elif "Long" in length_option: length_instr = "50 exchanges. Very detailed."
-                elif "Extra Long" in length_option: length_instr = "80 exchanges. Comprehensive."
+            # Get Client based on Model Choice
+            llm_client, llm_model, err = get_llm_client(model_choice, openai_key, xai_key)
+            
+            if err:
+                st.error(err)
+            else:
+                try:
+                    length_instr = "12-15 exchanges"
+                    if "Medium" in length_option: length_instr = "30 exchanges. Deep dive."
+                    elif "Long" in length_option: length_instr = "50 exchanges. Very detailed."
+                    elif "Extra Long" in length_option: length_instr = "80 exchanges. Comprehensive."
 
-                call_in_instr = ""
-                if caller_prompt:
-                    call_in_instr = f"""
-                    MANDATORY: Halfway through the script, include a 'Listener Call-in' segment.
-                    The speaker label must be "Caller".
-                    The Caller says: "{caller_prompt}".
-                    Host 1 and Host 2 must react to this call and debate the caller's point.
+                    call_in_instr = ""
+                    if caller_prompt:
+                        call_in_instr = f"MANDATORY: Include a 'Caller' speaker who asks: '{caller_prompt}'. Hosts must discuss this."
+
+                    prompt = f"""
+                    Create a podcast script.
+                    Language: {language}
+                    Length: {length_instr}
+                    Host 1: {host1_persona}
+                    Host 2: {host2_persona}
+                    DIRECTOR NOTES: {user_instructions}
+                    {call_in_instr}
+                    Format: JSON {{ "title": "...", "dialogue": [ {{"speaker": "Host 1", "text": "..."}}, {{"speaker": "Caller", "text": "..."}} ] }}
+                    Text: {st.session_state.source_text[:35000]}
                     """
-
-                prompt = f"""
-                Create a podcast script.
-                Language: {language}
-                Length: {length_instr}
-                Host 1: {host1_persona}
-                Host 2: {host2_persona}
-                
-                DIRECTOR NOTES: {user_instructions}
-                {call_in_instr}
-                
-                Format: JSON {{ "title": "...", "dialogue": [ {{"speaker": "Host 1", "text": "..."}}, {{"speaker": "Caller", "text": "..."}} ] }}
-                Text: {st.session_state.source_text[:35000]}
-                """
-                
-                with st.spinner("Drafting Script..."):
-                    res = client.chat.completions.create(
-                        model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}], response_format={"type": "json_object"}
-                    )
-                    st.session_state.script_data = json.loads(res.choices[0].message.content)
-                    st.success("Ready!")
-                    if privacy_mode: st.session_state.source_text = ""
-            except Exception as e: st.error(f"Error: {e}")
+                    
+                    with st.spinner(f"Drafting Script using {model_choice}..."):
+                        res = llm_client.chat.completions.create(
+                            model=llm_model,
+                            messages=[{"role": "user", "content": prompt}],
+                            response_format={"type": "json_object"}
+                        )
+                        st.session_state.script_data = json.loads(res.choices[0].message.content)
+                        st.success("Ready!")
+                        if privacy_mode: st.session_state.source_text = ""
+                except Exception as e: st.error(f"Error: {e}")
 
     if st.session_state.script_data:
         data = st.session_state.script_data
@@ -358,14 +383,11 @@ with tab3:
             new_d = []
             for i, l in enumerate(data['dialogue']):
                 c1, c2 = st.columns([1, 5])
-                # Add "Caller" to the dropdown options if it appears
                 roles = ["Host 1", "Host 2"]
                 if l['speaker'] == "Caller": roles.append("Caller")
-                
                 idx = 0
                 if l['speaker'] == "Host 2": idx = 1
                 elif l['speaker'] == "Caller": idx = 2
-                
                 spk = c1.selectbox("Role", roles, index=idx if idx < len(roles) else 0, key=f"s{i}")
                 txt = c2.text_area("Line", l['text'], height=70, key=f"t{i}")
                 new_d.append({"speaker": spk, "text": txt})
@@ -376,11 +398,15 @@ with tab3:
 # --- TAB 4: AUDIO ---
 with tab4:
     if st.session_state.script_data and st.button("🎙️ Start Production", type="primary"):
-        if not api_key: st.stop()
+        # AUDIO MUST USE OPENAI (xAI doesn't support TTS yet)
+        if not openai_key: 
+            st.error("OpenAI API Key is REQUIRED for Audio Generation (even if you used Model B for the script).")
+            st.stop()
         
         progress = st.progress(0)
         status = st.empty()
-        client = OpenAI(api_key=api_key)
+        # Force OpenAI Client for Audio
+        audio_client = OpenAI(api_key=openai_key)
         m_voice, f_voice = voice_map[voice_style]
         
         with tempfile.TemporaryDirectory() as tmp:
@@ -390,21 +416,17 @@ with tab4:
             
             for i, line in enumerate(script):
                 status.text(f"Recording {i+1}/{len(script)}...")
-                
-                # Voice Selection Logic
                 voice = m_voice
                 if line['speaker'] == "Host 2": voice = f_voice
-                elif line['speaker'] == "Caller": voice = "fable" # Distinct voice for caller
+                elif line['speaker'] == "Caller": voice = "fable"
                 
                 f_path = str(tmp_path / f"line_{i}.mp3")
-                if generate_audio_openai(client, line['text'], voice, f_path):
+                if generate_audio_openai(audio_client, line['text'], voice, f_path):
                     seg = AudioSegment.from_file(f_path)
-                    
-                    # Apply Telephone FX if Caller
                     if line['speaker'] == "Caller":
+                        from pydub.effects import high_pass_filter, low_pass_filter
                         seg = high_pass_filter(seg, 300)
                         seg = low_pass_filter(seg, 3000)
-                        
                     segs.append(seg)
                     segs.append(AudioSegment.silent(duration=350))
                 progress.progress((i+1)/len(script))
@@ -413,7 +435,6 @@ with tab4:
                 status.text("Mixing...")
                 final = sum(segs)
                 
-                # Music Logic
                 bg_seg = None
                 try:
                     if bg_source == "Presets" and selected_bg_url:
