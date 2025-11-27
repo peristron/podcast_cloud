@@ -12,24 +12,21 @@ import json
 import edge_tts
 import requests
 import shutil
-import re
 from pathlib import Path
 from pydub import AudioSegment
 
 # --- TEXT PROCESSING ---
 import PyPDF2
 import docx
-from bs4 import BeautifulSoup
 
 # --- AI CLIENT ---
 from openai import OpenAI
 
 # ================= CONFIGURATION =================
 st.set_page_config(
-    page_title="PodcastLM Cloud (OpenAI)", 
+    page_title="PodcastLM Cloud", 
     page_icon="🎙️", 
-    layout="centered",
-    initial_sidebar_state="expanded"
+    layout="centered"
 )
 
 # ================= SESSION STATE =================
@@ -41,15 +38,12 @@ if "audio_path" not in st.session_state:
 # ================= UTILITY FUNCTIONS =================
 
 def check_ffmpeg():
-    """Checks if FFmpeg is installed"""
     if shutil.which("ffmpeg") is None:
-        st.error("🚨 **System Error: FFmpeg not found.**")
-        st.markdown("Please ensure `packages.txt` contains `ffmpeg` in your GitHub repo.")
+        st.error("🚨 FFmpeg not found. Please ensure `packages.txt` contains `ffmpeg`.")
         return False
     return True
 
 def extract_text_from_files(files):
-    """Extracts text from uploaded files"""
     text = ""
     for file in files:
         try:
@@ -63,62 +57,68 @@ def extract_text_from_files(files):
             elif name.endswith(".txt"):
                 text = file.getvalue().decode("utf-8")
         except Exception as e:
-            st.warning(f"Could not read {file.name}: {e}")
+            st.warning(f"Error reading {file.name}: {e}")
     return text
 
 def clean_text_for_audio(text):
-    """Removes markdown and special characters that break EdgeTTS"""
-    # Remove bold/italic markdown
-    text = text.replace("*", "").replace("_", "")
-    # Remove quotes that might look weird
-    text = text.replace('"', "").replace("'", "")
-    return text.strip()
+    # Remove asterisks and special markdown that breaks TTS
+    return text.replace("*", "").replace("#", "").replace('"', "").strip()
 
-async def generate_tts_with_retry(text, voice, output_path):
+async def generate_all_audio(script, m_voice, f_voice, temp_path, progress_bar, status_text):
     """
-    Generates audio with a retry mechanism.
-    EdgeTTS acts up on Cloud servers, so we try 3 times.
+    Generates ALL audio lines in a single async session to prevent
+    connection banning/dropping.
     """
-    text = clean_text_for_audio(text)
-    if not text: return # Skip empty lines
+    audio_files = []
+    total = len(script)
     
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            communicate = edge_tts.Communicate(text, voice)
-            await communicate.save(output_path)
-            return # Success
-        except Exception as e:
-            if attempt == max_retries - 1:
-                # If last attempt failed, raise the error
-                raise e
-            # Wait 1 second before retrying
-            await asyncio.sleep(1)
+    for i, line in enumerate(script):
+        status_text.text(f"Generating line {i+1} of {total}...")
+        
+        speaker = line['speaker']
+        text = clean_text_for_audio(line['text'])
+        voice = m_voice if speaker == "Alex" else f_voice
+        filename = str(temp_path / f"line_{i}.mp3")
+        
+        if not text:
+            continue
+
+        # Retry logic for individual lines
+        for attempt in range(3):
+            try:
+                comm = edge_tts.Communicate(text, voice)
+                await comm.save(filename)
+                audio_files.append(filename)
+                break # Success, move to next line
+            except Exception as e:
+                if attempt == 2:
+                    st.warning(f"Failed to generate line {i+1}: {e}")
+                await asyncio.sleep(1) # Wait before retry
+        
+        progress_bar.progress((i + 1) / total)
+        
+    return audio_files
 
 # ================= MAIN UI =================
 
 st.title("🎙️ PodcastLM Cloud")
-st.caption("Powered by OpenAI GPT-4o-mini & EdgeTTS")
+st.caption("Powered by OpenAI & EdgeTTS")
 
 if not check_ffmpeg():
     st.stop()
 
-# --- SIDEBAR SETTINGS ---
+# --- SIDEBAR ---
 with st.sidebar:
     st.header("⚙️ Settings")
     
-    # 1. API Key Handling
-    api_key = None
-    if "OPENAI_API_KEY" in st.secrets:
-        api_key = st.secrets["OPENAI_API_KEY"]
-        st.success("✅ API Key loaded")
+    api_key = st.secrets.get("OPENAI_API_KEY")
+    if not api_key:
+        api_key = st.text_input("OpenAI API Key", type="password")
     else:
-        api_key = st.text_input("OpenAI API Key", type="password", placeholder="sk-...")
-        st.caption("[Get Key Here](https://platform.openai.com/api-keys)")
+        st.success("✅ API Key Loaded")
 
     st.divider()
     
-    # 2. Voice Settings
     voice_style = st.selectbox("Podcast Style", [
         "NPR Style (Balanced)", 
         "Morning Radio (Energetic)", 
@@ -134,168 +134,111 @@ with st.sidebar:
     add_music = st.checkbox("Add Background Music", value=True)
 
 # --- TABS ---
-tab1, tab2, tab3 = st.tabs(["1. Input Content", "2. Edit Script", "3. Listen"])
+tab1, tab2, tab3 = st.tabs(["1. Input", "2. Edit", "3. Listen"])
 
-# ================= TAB 1: INPUT =================
+# TAB 1: INPUT
 with tab1:
-    input_method = st.radio("Input Source", ["Upload Files", "Paste Text"], horizontal=True)
-    
+    input_method = st.radio("Source", ["Upload Files", "Paste Text"], horizontal=True)
     final_text = ""
     
     if input_method == "Upload Files":
-        files = st.file_uploader("Drop PDF, DOCX, or TXT files", accept_multiple_files=True)
+        files = st.file_uploader("Drop PDF/DOCX/TXT", accept_multiple_files=True)
         if files:
-            with st.spinner("Reading files..."):
+            with st.spinner("Processing..."):
                 final_text = extract_text_from_files(files)
-                st.caption(f"Loaded {len(final_text)} characters.")
     else:
-        final_text = st.text_area("Paste Article / Text Here", height=300)
+        final_text = st.text_area("Paste Text", height=300)
 
     if st.button("Generate Script", type="primary"):
-        if not api_key:
-            st.error("Please provide an OpenAI API Key.")
-        elif len(final_text) < 50:
-            st.error("Text is too short.")
+        if not api_key or len(final_text) < 50:
+            st.error("Need API Key and valid text.")
         else:
             try:
                 client = OpenAI(api_key=api_key)
-                
                 prompt = f"""
-                You are a podcast producer. Convert the source text into an engaging dialogue between two hosts, Alex (Male) and Sam (Female).
-                
-                Rules:
-                1. Make it sound natural (include brief laughs, 'hmm', 'exactly').
-                2. Do not just summarize; discuss the content as friends.
-                3. Length: Approx 12-16 exchanges.
-                
-                Output strictly JSON format:
-                {{
-                    "title": "Catchy Title",
-                    "dialogue": [
-                        {{"speaker": "Alex", "text": "..."}},
-                        {{"speaker": "Sam", "text": "..."}}
-                    ]
-                }}
-                
-                Source Text:
-                {final_text[:20000]} 
+                Create a podcast script (Alex=Male, Sam=Female).
+                Title: Catchy title.
+                Dialogue: 10-15 exchanges. Casual, friendly, engaging.
+                Format: JSON {{ "title": "...", "dialogue": [{{"speaker": "...", "text": "..."}}] }}
+                Text: {final_text[:15000]}
                 """
-                
-                with st.spinner("Writing script with GPT-4o-mini..."):
-                    completion = client.chat.completions.create(
+                with st.spinner("Writing script..."):
+                    res = client.chat.completions.create(
                         model="gpt-4o-mini",
-                        messages=[{"role": "system", "content": "You are a helpful scriptwriter."},
-                                  {"role": "user", "content": prompt}],
-                        temperature=0.7,
+                        messages=[{"role": "user", "content": prompt}],
                         response_format={"type": "json_object"}
                     )
-                    
-                    script_json = json.loads(completion.choices[0].message.content)
-                    st.session_state.script_data = script_json
+                    st.session_state.script_data = json.loads(res.choices[0].message.content)
                     st.session_state.audio_path = None
-                    st.success("Script generated! Go to the 'Edit Script' tab.")
-                        
+                    st.success("Script Ready! Click Tab 2.")
             except Exception as e:
-                st.error(f"OpenAI Error: {e}")
+                st.error(f"Error: {e}")
 
-# ================= TAB 2: EDIT =================
+# TAB 2: EDIT
 with tab2:
     if st.session_state.script_data:
         data = st.session_state.script_data
-        st.subheader(f"Title: {data.get('title', 'Podcast')}")
-        
-        with st.form("edit_script_form"):
-            updated_dialogue = []
+        with st.form("edit_form"):
+            new_dialogue = []
             for i, line in enumerate(data['dialogue']):
-                col_a, col_b = st.columns([1, 5])
-                with col_a:
-                    speakers = ["Alex", "Sam"]
-                    current_idx = 0 if line['speaker'] == "Alex" else 1
-                    new_speaker = st.selectbox(f"Speaker", speakers, index=current_idx, key=f"spk_{i}", label_visibility="collapsed")
-                with col_b:
-                    new_text = st.text_area(f"Line {i+1}", value=line['text'], height=70, key=f"txt_{i}", label_visibility="collapsed")
-                updated_dialogue.append({"speaker": new_speaker, "text": new_text})
+                c1, c2 = st.columns([1, 5])
+                spk = c1.selectbox("Speaker", ["Alex", "Sam"], index=0 if line['speaker']=="Alex" else 1, key=f"s{i}")
+                txt = c2.text_area("Line", line['text'], height=60, key=f"t{i}", label_visibility="collapsed")
+                new_dialogue.append({"speaker": spk, "text": txt})
             
-            if st.form_submit_button("Save Changes"):
-                st.session_state.script_data['dialogue'] = updated_dialogue
-                st.success("Script updated.")
-    else:
-        st.info("Generate a script in Tab 1 first.")
+            if st.form_submit_button("Save Script"):
+                st.session_state.script_data['dialogue'] = new_dialogue
+                st.success("Saved!")
 
-# ================= TAB 3: AUDIO =================
+# TAB 3: AUDIO
 with tab3:
     if st.session_state.script_data:
-        if st.button("🚀 Generate Audio (MP3)", type="primary"):
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
+        if st.button("🚀 Generate Audio", type="primary"):
+            progress = st.progress(0)
+            status = st.empty()
             m_voice, f_voice = voice_map[voice_style]
-            script = st.session_state.script_data['dialogue']
             
-            # Create Temp Dir
-            with tempfile.TemporaryDirectory() as temp_dir:
-                temp_path = Path(temp_dir)
-                audio_segments = []
+            with tempfile.TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
                 
-                total_lines = len(script)
-                
-                for idx, line in enumerate(script):
-                    status_text.text(f"Recording line {idx+1} of {total_lines}...")
+                # CALL THE SINGLE ASYNC BATCH FUNCTION
+                try:
+                    generated_files = asyncio.run(generate_all_audio(
+                        st.session_state.script_data['dialogue'],
+                        m_voice, f_voice, tmp_path, progress, status
+                    ))
                     
-                    voice = m_voice if line['speaker'] == "Alex" else f_voice
-                    filename = temp_path / f"line_{idx}.mp3"
-                    
-                    try:
-                        # Call the new Retry Function
-                        asyncio.run(generate_tts_with_retry(line['text'], voice, str(filename)))
+                    if generated_files:
+                        status.text("Stitching audio...")
+                        combined = AudioSegment.empty()
+                        for f in generated_files:
+                            combined += AudioSegment.from_file(f)
+                            combined += AudioSegment.silent(duration=300)
                         
-                        # Append Audio
-                        seg = AudioSegment.from_file(filename)
-                        audio_segments.append(seg)
-                        audio_segments.append(AudioSegment.silent(duration=300)) # Pause
+                        if add_music:
+                            try:
+                                music_url = "https://cdn.pixabay.com/download/audio/2022/05/27/audio_1808fbf07a.mp3?filename=lofi-study-112191.mp3"
+                                m_data = requests.get(music_url).content
+                                with open(tmp_path / "music.mp3", "wb") as f: f.write(m_data)
+                                bg = AudioSegment.from_file(tmp_path / "music.mp3") - 25
+                                while len(bg) < len(combined) + 5000: bg += bg
+                                combined = bg[:len(combined)+1000].fade_out(2000).overlay(combined)
+                            except: pass
+                            
+                        out_path = "podcast.mp3"
+                        combined.export(out_path, format="mp3")
+                        st.session_state.audio_path = out_path
+                        status.text("Done!")
+                        st.rerun()
+                    else:
+                        st.error("Failed to generate audio segments.")
                         
-                    except Exception as e:
-                        st.warning(f"Skipped line {idx+1} due to error: {e}")
+                except Exception as e:
+                    st.error(f"Critical Error: {e}")
                     
-                    progress_bar.progress((idx + 1) / (total_lines + 1))
-
-                # Mix Audio
-                status_text.text("Mixing audio...")
-                if audio_segments:
-                    final_audio = sum(audio_segments)
-                    
-                    if add_music:
-                        try:
-                            music_url = "https://cdn.pixabay.com/download/audio/2022/05/27/audio_1808fbf07a.mp3?filename=lofi-study-112191.mp3"
-                            music_data = requests.get(music_url, timeout=10).content
-                            with open(temp_path / "bg_music.mp3", "wb") as f:
-                                f.write(music_data)
-                            bg_music = AudioSegment.from_file(temp_path / "bg_music.mp3")
-                            bg_music = bg_music - 25 # Lower Volume
-                            
-                            # Loop Music
-                            while len(bg_music) < len(final_audio) + 5000:
-                                bg_music += bg_music
-                            
-                            # Trim and Fade
-                            bg_music = bg_music[:len(final_audio) + 1000].fade_out(2000)
-                            final_audio = bg_music.overlay(final_audio)
-                        except Exception as e:
-                            st.warning(f"Music failed to load, skipping music: {e}")
-
-                    # Export
-                    output_filename = "podcast_output.mp3"
-                    final_audio.export(output_filename, format="mp3")
-                    st.session_state.audio_path = output_filename
-                    progress_bar.progress(100)
-                    status_text.text("Done! Audio Ready below.")
-                else:
-                    st.error("No audio segments were generated successfully.")
-
         if st.session_state.audio_path:
             st.audio(st.session_state.audio_path)
             with open(st.session_state.audio_path, "rb") as f:
-                st.download_button("Download MP3", f, file_name="my_podcast.mp3")
-    else:
-        st.info("Generate a script in Tab 1 first.")
+                st.download_button("Download MP3", f, "podcast.mp3")
+
 
