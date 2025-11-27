@@ -127,11 +127,11 @@ with st.sidebar:
     # --- LANGUAGE SUPPORT ---
     st.subheader("🌍 Localization")
     
-    # Comprehensive Language List
+    # Added Urdu to the list
     language_options = [
         "English (US)", "English (UK)", "Spanish (Spain)", "Spanish (LatAm)", 
         "French", "German", "Italian", "Portuguese", "Portuguese (Brazil)",
-        "Japanese", "Chinese (Mandarin)", "Korean", "Hindi", "Arabic", "Russian",
+        "Japanese", "Chinese (Mandarin)", "Korean", "Hindi", "Urdu", "Arabic", "Russian",
         "Turkish", "Dutch", "Polish", "Swedish", "Danish", "Norwegian", "Finnish",
         "Greek", "Czech", "Romanian", "Indonesian", "Vietnamese", "Thai", "Hebrew"
     ]
@@ -229,7 +229,7 @@ with tab1:
             try:
                 client = OpenAI(api_key=api_key)
                 
-                # UPDATED DURATION LOGIC (Fixes short podcasts)
+                # UPDATED DURATION LOGIC
                 length_instr = "12-15 exchanges (approx 2-3 mins). Keep it punchy."
                 if "Medium" in length_option:
                     length_instr = "30 exchanges. Go deep into details. Use analogies."
@@ -350,10 +350,11 @@ with tab3:
                         except Exception as e:
                             st.warning(f"Could not add music: {e}")
                     
-                    # 3. Export & Load to Memory (Fixes Pause/Resume)
+                    # 3. Export & Load to Memory
                     out_file = tmp_path / "podcast_master.mp3"
                     final_mix.export(out_file, format="mp3", bitrate="192k")
                     
+                    # Read into memory to fix playback issues
                     with open(out_file, "rb") as f:
                         audio_bytes = f.read()
                     
