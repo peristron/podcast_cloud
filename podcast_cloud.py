@@ -22,19 +22,40 @@ from openai import OpenAI
 
 # ================= CONFIGURATION =================
 st.set_page_config(
-    page_title="PodcastLM Cloud (Stable)", 
-    page_icon="🎙️", 
+    page_title="PodcastLM Cloud (Secured)", 
+    page_icon="🔒", 
     layout="centered"
 )
 
-# ================= SESSION STATE =================
+# ================= AUTHENTICATION =================
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+
+def check_password():
+    """Checks the password against Streamlit Secrets"""
+    user_pass = st.session_state.get("password_input", "")
+    correct_pass = st.secrets.get("APP_PASSWORD")
+    
+    if correct_pass and user_pass == correct_pass:
+        st.session_state.authenticated = True
+    else:
+        st.error("❌ Incorrect Password")
+
+if not st.session_state.authenticated:
+    st.title("🔒 Login Required")
+    st.markdown("Please enter the access password to use this app.")
+    st.text_input("Password", type="password", key="password_input", on_change=check_password)
+    st.stop() # STOP HERE if not authenticated
+
+# ================= APP STARTS HERE (Only runs if logged in) =================
+
+# --- SESSION STATE ---
 if "script_data" not in st.session_state:
     st.session_state.script_data = None
 if "audio_path" not in st.session_state:
     st.session_state.audio_path = None
 
-# ================= UTILITY FUNCTIONS =================
-
+# --- UTILS ---
 def check_ffmpeg():
     if shutil.which("ffmpeg") is None:
         st.error("🚨 FFmpeg not found. Please ensure `packages.txt` contains `ffmpeg`.")
@@ -59,9 +80,6 @@ def extract_text_from_files(files):
     return text
 
 def generate_audio_openai(client, text, voice, filename):
-    """
-    Uses OpenAI TTS (Official API) - Reliable and High Quality
-    """
     try:
         response = client.audio.speech.create(
             model="tts-1",
@@ -74,31 +92,36 @@ def generate_audio_openai(client, text, voice, filename):
         st.error(f"OpenAI TTS Error: {e}")
         return False
 
-# ================= MAIN UI =================
-
+# --- MAIN UI ---
 st.title("🎙️ PodcastLM Cloud")
 st.caption("Powered by OpenAI (GPT-4o-mini & TTS-1)")
 
 if not check_ffmpeg():
     st.stop()
 
-# --- SIDEBAR ---
 with st.sidebar:
     st.header("⚙️ Settings")
     
+    # API Key from Secrets (Preferred) or Input
     api_key = st.secrets.get("OPENAI_API_KEY")
     if not api_key:
         api_key = st.text_input("OpenAI API Key", type="password")
     
     st.divider()
     
-    voice_style = st.selectbox("Podcast Style", [
+    # Length Control
+    length_option = st.select_slider(
+        "Podcast Length", 
+        options=["Short (2 min)", "Medium (5 min)", "Long (15-30 min)"],
+        value="Short (2 min)"
+    )
+    
+    voice_style = st.selectbox("Voice Style", [
         "Dynamic (Alloy & Nova)", 
         "Calm (Onyx & Shimmer)", 
         "Formal (Echo & Fable)",
     ])
     
-    # OpenAI Voice Mappings
     voice_map = {
         "Dynamic (Alloy & Nova)": ("alloy", "nova"),
         "Calm (Onyx & Shimmer)": ("onyx", "shimmer"),
@@ -107,10 +130,8 @@ with st.sidebar:
     
     add_music = st.checkbox("Add Background Music", value=True)
 
-# --- TABS ---
 tab1, tab2, tab3 = st.tabs(["1. Input", "2. Edit", "3. Listen"])
 
-# TAB 1: INPUT
 with tab1:
     input_method = st.radio("Source", ["Upload Files", "Paste Text"], horizontal=True)
     final_text = ""
@@ -129,13 +150,23 @@ with tab1:
         else:
             try:
                 client = OpenAI(api_key=api_key)
+                
+                # Adjust prompt based on length selection
+                length_instruction = "10-12 exchanges (approx 2 minutes)"
+                if "Medium" in length_option:
+                    length_instruction = "25-30 exchanges (approx 5 minutes). Go deeper into the topic."
+                elif "Long" in length_option:
+                    length_instruction = "At least 50 exchanges (approx 15-20 minutes). Very detailed discussion, deep dive."
+
                 prompt = f"""
                 Create a podcast script (Host 1 = Male, Host 2 = Female).
                 Title: Catchy title.
-                Dialogue: 12-16 exchanges. Casual, friendly, engaging.
+                Goal: {length_instruction}
+                Style: Casual, friendly, engaging banter.
                 Format: JSON {{ "title": "...", "dialogue": [{{"speaker": "Host 1", "text": "..."}}, {{"speaker": "Host 2", "text": "..."}}] }}
-                Text: {final_text[:15000]}
+                Source Text: {final_text[:25000]}
                 """
+                
                 with st.spinner("Writing script..."):
                     res = client.chat.completions.create(
                         model="gpt-4o-mini",
@@ -148,10 +179,12 @@ with tab1:
             except Exception as e:
                 st.error(f"Error: {e}")
 
-# TAB 2: EDIT
 with tab2:
     if st.session_state.script_data:
         data = st.session_state.script_data
+        st.subheader(f"Title: {data.get('title', 'Podcast')}")
+        st.info("💡 Tip: You can edit the text below before generating audio.")
+        
         with st.form("edit_form"):
             new_dialogue = []
             for i, line in enumerate(data['dialogue']):
@@ -160,11 +193,10 @@ with tab2:
                 txt = c2.text_area("Line", line['text'], height=60, key=f"t{i}", label_visibility="collapsed")
                 new_dialogue.append({"speaker": spk, "text": txt})
             
-            if st.form_submit_button("Save Script"):
+            if st.form_submit_button("Save Script Changes"):
                 st.session_state.script_data['dialogue'] = new_dialogue
-                st.success("Saved!")
+                st.success("Script updated!")
 
-# TAB 3: AUDIO
 with tab3:
     if st.session_state.script_data:
         if st.button("🚀 Generate Audio", type="primary"):
@@ -185,11 +217,9 @@ with tab3:
                 for i, line in enumerate(script):
                     status.text(f"Recording line {i+1} of {len(script)}...")
                     
-                    # Determine voice
                     voice = m_voice if line['speaker'] == "Host 1" else f_voice
                     filename = str(tmp_path / f"line_{i}.mp3")
                     
-                    # Call OpenAI TTS (Synchronous = Reliable)
                     success = generate_audio_openai(client, line['text'], voice, filename)
                     
                     if success:
@@ -206,10 +236,11 @@ with tab3:
                     if add_music:
                         try:
                             music_url = "https://cdn.pixabay.com/download/audio/2022/05/27/audio_1808fbf07a.mp3?filename=lofi-study-112191.mp3"
-                            m_data = requests.get(music_url).content
+                            m_data = requests.get(music_url, timeout=10).content
                             with open(tmp_path / "music.mp3", "wb") as f: f.write(m_data)
                             bg = AudioSegment.from_file(tmp_path / "music.mp3") - 25
                             
+                            # Loop music to fit length
                             while len(bg) < len(combined) + 10000: bg += bg
                             combined = bg[:len(combined)+1000].fade_out(2000).overlay(combined)
                         except Exception as e:
@@ -227,6 +258,7 @@ with tab3:
             st.audio(st.session_state.audio_path)
             with open(st.session_state.audio_path, "rb") as f:
                 st.download_button("Download MP3", f, "podcast.mp3")
+
 
 
 
