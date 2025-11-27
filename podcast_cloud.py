@@ -12,6 +12,7 @@ import json
 import edge_tts
 import requests
 import shutil
+import re
 from pathlib import Path
 from pydub import AudioSegment
 
@@ -65,10 +66,34 @@ def extract_text_from_files(files):
             st.warning(f"Could not read {file.name}: {e}")
     return text
 
-async def generate_tts_audio(text, voice, output_path):
-    """Async wrapper for EdgeTTS"""
-    communicate = edge_tts.Communicate(text, voice)
-    await communicate.save(output_path)
+def clean_text_for_audio(text):
+    """Removes markdown and special characters that break EdgeTTS"""
+    # Remove bold/italic markdown
+    text = text.replace("*", "").replace("_", "")
+    # Remove quotes that might look weird
+    text = text.replace('"', "").replace("'", "")
+    return text.strip()
+
+async def generate_tts_with_retry(text, voice, output_path):
+    """
+    Generates audio with a retry mechanism.
+    EdgeTTS acts up on Cloud servers, so we try 3 times.
+    """
+    text = clean_text_for_audio(text)
+    if not text: return # Skip empty lines
+    
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            communicate = edge_tts.Communicate(text, voice)
+            await communicate.save(output_path)
+            return # Success
+        except Exception as e:
+            if attempt == max_retries - 1:
+                # If last attempt failed, raise the error
+                raise e
+            # Wait 1 second before retrying
+            await asyncio.sleep(1)
 
 # ================= MAIN UI =================
 
@@ -165,7 +190,6 @@ with tab1:
                         response_format={"type": "json_object"}
                     )
                     
-                    # OpenAI guarantees valid JSON with response_format
                     script_json = json.loads(completion.choices[0].message.content)
                     st.session_state.script_data = script_json
                     st.session_state.audio_path = None
@@ -208,43 +232,65 @@ with tab3:
             m_voice, f_voice = voice_map[voice_style]
             script = st.session_state.script_data['dialogue']
             
+            # Create Temp Dir
             with tempfile.TemporaryDirectory() as temp_dir:
                 temp_path = Path(temp_dir)
                 audio_segments = []
                 
+                total_lines = len(script)
+                
                 for idx, line in enumerate(script):
-                    status_text.text(f"Recording line {idx+1} of {len(script)}...")
+                    status_text.text(f"Recording line {idx+1} of {total_lines}...")
+                    
                     voice = m_voice if line['speaker'] == "Alex" else f_voice
                     filename = temp_path / f"line_{idx}.mp3"
-                    asyncio.run(generate_tts_audio(line['text'], voice, str(filename)))
-                    seg = AudioSegment.from_file(filename)
-                    audio_segments.append(seg)
-                    audio_segments.append(AudioSegment.silent(duration=300))
-                    progress_bar.progress((idx + 1) / (len(script) + 1))
-
-                status_text.text("Mixing audio...")
-                final_audio = sum(audio_segments)
-                
-                if add_music:
+                    
                     try:
-                        music_url = "https://cdn.pixabay.com/download/audio/2022/05/27/audio_1808fbf07a.mp3?filename=lofi-study-112191.mp3"
-                        music_data = requests.get(music_url).content
-                        with open(temp_path / "bg_music.mp3", "wb") as f:
-                            f.write(music_data)
-                        bg_music = AudioSegment.from_file(temp_path / "bg_music.mp3")
-                        bg_music = bg_music - 25
-                        while len(bg_music) < len(final_audio) + 5000:
-                            bg_music += bg_music
-                        bg_music = bg_music[:len(final_audio) + 1000].fade_out(2000)
-                        final_audio = bg_music.overlay(final_audio)
-                    except:
-                        pass
+                        # Call the new Retry Function
+                        asyncio.run(generate_tts_with_retry(line['text'], voice, str(filename)))
+                        
+                        # Append Audio
+                        seg = AudioSegment.from_file(filename)
+                        audio_segments.append(seg)
+                        audio_segments.append(AudioSegment.silent(duration=300)) # Pause
+                        
+                    except Exception as e:
+                        st.warning(f"Skipped line {idx+1} due to error: {e}")
+                    
+                    progress_bar.progress((idx + 1) / (total_lines + 1))
 
-                output_filename = "podcast_output.mp3"
-                final_audio.export(output_filename, format="mp3")
-                st.session_state.audio_path = output_filename
-                progress_bar.progress(100)
-                status_text.text("Ready!")
+                # Mix Audio
+                status_text.text("Mixing audio...")
+                if audio_segments:
+                    final_audio = sum(audio_segments)
+                    
+                    if add_music:
+                        try:
+                            music_url = "https://cdn.pixabay.com/download/audio/2022/05/27/audio_1808fbf07a.mp3?filename=lofi-study-112191.mp3"
+                            music_data = requests.get(music_url, timeout=10).content
+                            with open(temp_path / "bg_music.mp3", "wb") as f:
+                                f.write(music_data)
+                            bg_music = AudioSegment.from_file(temp_path / "bg_music.mp3")
+                            bg_music = bg_music - 25 # Lower Volume
+                            
+                            # Loop Music
+                            while len(bg_music) < len(final_audio) + 5000:
+                                bg_music += bg_music
+                            
+                            # Trim and Fade
+                            bg_music = bg_music[:len(final_audio) + 1000].fade_out(2000)
+                            final_audio = bg_music.overlay(final_audio)
+                        except Exception as e:
+                            st.warning(f"Music failed to load, skipping music: {e}")
+
+                    # Export
+                    output_filename = "podcast_output.mp3"
+                    final_audio.export(output_filename, format="mp3")
+                    st.session_state.audio_path = output_filename
+                    progress_bar.progress(100)
+                    status_text.text("Done! Audio Ready below.")
+                else:
+                    st.error("No audio segments were generated successfully.")
 
         if st.session_state.audio_path:
             st.audio(st.session_state.audio_path)
@@ -252,3 +298,4 @@ with tab3:
                 st.download_button("Download MP3", f, file_name="my_podcast.mp3")
     else:
         st.info("Generate a script in Tab 1 first.")
+
