@@ -60,19 +60,18 @@ if not st.session_state.authenticated:
 
 # ================= UTILS =================
 
-def get_llm_client(model_selection, openai_key, xai_key):
+def get_llm_client(model_selection, specific_model_name, openai_key, xai_key):
     """
-    Returns the appropriate client and model string based on selection.
-    Model A = OpenAI (gpt-4o-mini)
-    Model B = xAI (grok-beta)
+    Returns client and model string.
     """
-    if model_selection == "Model A":
+    if model_selection == "Model A (OpenAI)":
         if not openai_key: return None, None, "Missing OpenAI API Key"
         return OpenAI(api_key=openai_key), "gpt-4o-mini", None
-    elif model_selection == "Model B":
+    
+    elif model_selection == "Model B (xAI Grok)":
         if not xai_key: return None, None, "Missing xAI API Key"
-        # xAI uses the OpenAI SDK but with a different Base URL
-        return OpenAI(api_key=xai_key, base_url="https://api.x.ai/v1"), "grok-beta", None
+        return OpenAI(api_key=xai_key, base_url="https://api.x.ai/v1"), specific_model_name, None
+        
     return None, None, "Invalid Selection"
 
 def download_file_with_headers(url, save_path):
@@ -116,7 +115,6 @@ def extract_text_from_files(files, audio_client=None):
             elif name.endswith(".txt"):
                 text = file.getvalue().decode("utf-8")
             elif name.endswith((".mp3", ".mp4", ".wav", ".m4a", ".mpeg", ".webm")):
-                # Must use OpenAI for Whisper (xAI doesn't support audio yet)
                 if audio_client:
                     with st.spinner(f"Transcribing {name}..."):
                         with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(name)[1]) as tmp_file:
@@ -165,12 +163,22 @@ def generate_audio_openai(client, text, voice, filename, speed=1.0):
 with st.sidebar:
     st.title("🎛️ Studio Settings")
     
-    # KEYS FOR BOTH MODELS
+    # KEYS
     openai_key = st.secrets.get("OPENAI_API_KEY") or st.text_input("OpenAI API Key", type="password")
     xai_key = st.secrets.get("XAI_API_KEY") or st.text_input("xAI API Key (Optional)", type="password")
     
-    # MODEL SELECTOR (MASKED)
-    model_choice = st.radio("Intelligence Engine", ["Model A", "Model B"], help="Model A = Standard, Model B = Alternative Logic")
+    # MODEL SELECTOR
+    model_choice = st.radio("Intelligence Engine", ["Model A (OpenAI)", "Model B (xAI Grok)"])
+    
+    # DYNAMIC SUB-SELECTOR FOR XAI VERSION
+    xai_version = "grok-2-latest" # Default
+    if model_choice == "Model B (xAI Grok)":
+        xai_version = st.selectbox(
+            "Grok Model Version", 
+            ["grok-2-latest", "grok-beta", "grok-3", "grok-vision-beta"],
+            index=0,
+            help="Select the specific Grok model version."
+        )
     
     privacy_mode = st.toggle("🛡️ Privacy Mode", value=False)
     
@@ -237,7 +245,7 @@ with tab1:
     input_type = st.radio("Input Type", ["📂 Files", "🔗 Web URL", "📺 Video URL", "📝 Text"], horizontal=True)
     new_text = ""
     
-    # Always initialize OpenAI client for Audio Transcriptions (Whisper), regardless of Script Writer choice
+    # Audio client is ALWAYS OpenAI (xAI has no audio support yet)
     audio_client = OpenAI(api_key=openai_key) if openai_key else None
 
     if input_type == "📂 Files":
@@ -262,11 +270,12 @@ with tab1:
                     text, err = download_and_transcribe_video(vid_url, audio_client)
                     if text: new_text = text
                     else: st.error(err)
-            else: st.error("OpenAI API Key Required for Transcription (even if using Model B for scripts).")
+            else: st.error("OpenAI API Key Required for Transcription (even if using Model B).")
     
     elif input_type == "📝 Text":
         new_text = st.text_area("Paste Text", height=300)
 
+    # Update State
     if new_text and new_text != st.session_state.source_text:
         st.session_state.source_text = new_text
         st.session_state.chat_history = [] 
@@ -291,8 +300,8 @@ with tab2:
                 with st.chat_message(message["role"]): st.markdown(message["content"])
             
             if prompt := st.chat_input("Ask a question..."):
-                # Get the correct client (OpenAI or xAI)
-                llm_client, llm_model, err = get_llm_client(model_choice, openai_key, xai_key)
+                # Get LLM Client (OpenAI or xAI)
+                llm_client, llm_model, err = get_llm_client(model_choice, xai_version, openai_key, xai_key)
                 
                 if err:
                     st.error(err)
@@ -334,11 +343,10 @@ with tab3:
         caller_prompt = st.text_area("Listener Question", placeholder="Type a question for a 'Caller' to ask...")
 
     if st.button("Generate Podcast Script", type="primary"):
-        if not st.session_state.source_text: 
-            st.error("No source text loaded.")
+        if not st.session_state.source_text: st.error("No source text loaded.")
         else:
-            # Get Client based on Model Choice
-            llm_client, llm_model, err = get_llm_client(model_choice, openai_key, xai_key)
+            # Get LLM Client (OpenAI or xAI)
+            llm_client, llm_model, err = get_llm_client(model_choice, xai_version, openai_key, xai_key)
             
             if err:
                 st.error(err)
@@ -365,7 +373,7 @@ with tab3:
                     Text: {st.session_state.source_text[:35000]}
                     """
                     
-                    with st.spinner(f"Drafting Script using {model_choice}..."):
+                    with st.spinner(f"Drafting Script using {llm_model}..."):
                         res = llm_client.chat.completions.create(
                             model=llm_model,
                             messages=[{"role": "user", "content": prompt}],
@@ -398,14 +406,14 @@ with tab3:
 # --- TAB 4: AUDIO ---
 with tab4:
     if st.session_state.script_data and st.button("🎙️ Start Production", type="primary"):
-        # AUDIO MUST USE OPENAI (xAI doesn't support TTS yet)
+        # Audio generation ALWAYS uses OpenAI
         if not openai_key: 
             st.error("OpenAI API Key is REQUIRED for Audio Generation (even if you used Model B for the script).")
             st.stop()
         
         progress = st.progress(0)
         status = st.empty()
-        # Force OpenAI Client for Audio
+        # Force OpenAI for Audio
         audio_client = OpenAI(api_key=openai_key)
         m_voice, f_voice = voice_map[voice_style]
         
@@ -466,6 +474,7 @@ with tab4:
                 status.success("Done!")
                 st.audio(ab, format="audio/mp3")
                 st.download_button("Download MP3", ab, "podcast.mp3", "audio/mp3")
+
 
 
 
