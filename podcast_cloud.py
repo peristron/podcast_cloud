@@ -218,7 +218,6 @@ with tab1:
     if input_type == "📂 Files":
         files = st.file_uploader("Upload", accept_multiple_files=True)
         if files and st.button("Process Files"):
-            # ADDED: Visual Loading Indicator
             with st.spinner("Processing uploaded files..."):
                 client = OpenAI(api_key=api_key) if api_key else None
                 new_text = extract_text_from_files(files, client)
@@ -245,14 +244,11 @@ with tab1:
     elif input_type == "📝 Text":
         new_text = st.text_area("Paste Text", height=300)
 
-    # Update State
     if new_text and new_text != st.session_state.source_text:
         st.session_state.source_text = new_text
         st.session_state.chat_history = [] 
-        
         timestamp = datetime.now().strftime("%H:%M:%S")
         st.session_state.notebook_content += f"\n---\n### 📥 New Source Loaded ({timestamp})\n*Source Type: {input_type}*\n\n"
-        
         st.success("✅ Source text loaded!")
 
     if st.session_state.source_text:
@@ -275,9 +271,7 @@ with tab2:
                 if api_key:
                     st.session_state.chat_history.append({"role": "user", "content": prompt})
                     st.session_state.notebook_content += f"**Q:** {prompt}\n\n"
-                    
                     with st.chat_message("user"): st.markdown(prompt)
-                    
                     with st.chat_message("assistant"):
                         client = OpenAI(api_key=api_key)
                         stream = client.chat.completions.create(
@@ -288,7 +282,6 @@ with tab2:
                                 {"role": "user", "content": prompt}
                             ], stream=True)
                         response = st.write_stream(stream)
-                    
                     st.session_state.chat_history.append({"role": "assistant", "content": response})
                     st.session_state.notebook_content += f"**A:** {response}\n\n"
                     st.rerun()
@@ -296,15 +289,19 @@ with tab2:
     with col_notes:
         st.subheader("📓 Research Notebook")
         st.caption("Auto-saves Q&A. Editable.")
-        
         updated_notebook = st.text_area("Notebook Content", value=st.session_state.notebook_content, height=600, key="notebook_area")
         if updated_notebook != st.session_state.notebook_content:
             st.session_state.notebook_content = updated_notebook
-        
         st.download_button("💾 Save Notebook (.md)", st.session_state.notebook_content, f"notebook_{datetime.now().strftime('%Y%m%d_%H%M')}.md")
 
 # --- TAB 3: SCRIPT ---
 with tab3:
+    st.markdown("### 🎬 Director Mode")
+    user_instructions = st.text_area(
+        "📢 Custom Direction / Focus Area", 
+        placeholder="e.g., 'Focus on the financial aspects', 'Make it very funny', 'Explain like I'm 5', 'Debate the pros and cons'"
+    )
+
     if st.button("Generate Podcast Script", type="primary"):
         if not api_key or not st.session_state.source_text: st.error("Missing Key or Text")
         else:
@@ -321,11 +318,14 @@ with tab3:
                 Length: {length_instr}
                 Host 1: {host1_persona}
                 Host 2: {host2_persona}
+                
+                SPECIAL USER DIRECTION: {user_instructions} (Prioritize this instruction above all else).
+                
                 Format: JSON {{ "title": "...", "dialogue": [ {{"speaker": "Host 1", "text": "..."}} ] }}
                 Text: {st.session_state.source_text[:35000]}
                 """
                 
-                with st.spinner("Drafting..."):
+                with st.spinner("Drafting Script..."):
                     res = client.chat.completions.create(
                         model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}], response_format={"type": "json_object"}
                     )
@@ -376,7 +376,6 @@ with tab4:
                 status.text("Mixing...")
                 final = sum(segs)
                 
-                # Music Logic
                 bg_seg = None
                 try:
                     if bg_source == "Presets" and selected_bg_url:
@@ -408,7 +407,6 @@ with tab4:
                 status.success("Done!")
                 st.audio(ab, format="audio/mp3")
                 st.download_button("Download MP3", ab, "podcast.mp3", "audio/mp3")
-
 
 
 
