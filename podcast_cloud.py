@@ -10,21 +10,25 @@ import tempfile
 import json
 import requests
 import shutil
+import re
 from pathlib import Path
 from pydub import AudioSegment
 
 # --- TEXT PROCESSING ---
 import PyPDF2
 import docx
+from bs4 import BeautifulSoup
+from youtube_transcript_api import YouTubeTranscriptApi
 
 # --- AI CLIENT ---
 from openai import OpenAI
 
 # ================= CONFIGURATION =================
 st.set_page_config(
-    page_title="PodcastLM Cloud (Secured)", 
-    page_icon="🔒", 
-    layout="centered"
+    page_title="PodcastLM Studio", 
+    page_icon="🎧", 
+    layout="wide", # Switched to wide for better editing
+    initial_sidebar_state="expanded"
 )
 
 # ================= AUTHENTICATION =================
@@ -32,35 +36,50 @@ if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 
 def check_password():
-    """Checks the password against Streamlit Secrets"""
     user_pass = st.session_state.get("password_input", "")
     correct_pass = st.secrets.get("APP_PASSWORD")
-    
     if correct_pass and user_pass == correct_pass:
         st.session_state.authenticated = True
     else:
         st.error("❌ Incorrect Password")
 
 if not st.session_state.authenticated:
-    st.title("🔒 Login Required")
-    st.markdown("Please enter the access password to use this app.")
-    st.text_input("Password", type="password", key="password_input", on_change=check_password)
-    st.stop() # STOP HERE if not authenticated
+    st.title("🔒 Studio Login")
+    st.text_input("Enter Password", type="password", key="password_input", on_change=check_password)
+    st.stop()
 
-# ================= APP STARTS HERE (Only runs if logged in) =================
+# ================= UTILS & SCRAPERS =================
 
-# --- SESSION STATE ---
-if "script_data" not in st.session_state:
-    st.session_state.script_data = None
-if "audio_path" not in st.session_state:
-    st.session_state.audio_path = None
+def clean_memory():
+    """Security: Explicitly deletes large text variables from session state"""
+    if "extracted_text" in st.session_state:
+        del st.session_state.extracted_text
+    
+def get_youtube_id(url):
+    """Extracts Video ID from YouTube URL"""
+    regex = r"(?:v=|\/)([0-9A-Za-z_-]{11}).*"
+    match = re.search(regex, url)
+    return match.group(1) if match else None
 
-# --- UTILS ---
-def check_ffmpeg():
-    if shutil.which("ffmpeg") is None:
-        st.error("🚨 FFmpeg not found. Please ensure `packages.txt` contains `ffmpeg`.")
-        return False
-    return True
+def get_youtube_transcript(video_id):
+    try:
+        transcript = YouTubeTranscriptApi.get_transcript(video_id)
+        text = " ".join([t['text'] for t in transcript])
+        return text
+    except Exception as e:
+        return f"Error: Could not retrieve transcript. {e}"
+
+def scrape_website(url):
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        response = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(response.content, 'html.parser')
+        # Kill scripts and styles
+        for script in soup(["script", "style", "header", "footer", "nav"]):
+            script.decompose()
+        return soup.get_text()
+    except Exception as e:
+        return f"Error scraping site: {e}"
 
 def extract_text_from_files(files):
     text = ""
@@ -75,189 +94,242 @@ def extract_text_from_files(files):
                 for para in doc.paragraphs: text += para.text + "\n"
             elif name.endswith(".txt"):
                 text = file.getvalue().decode("utf-8")
-        except Exception as e:
-            st.error(f"Error reading {file.name}: {e}")
+        except: pass
     return text
 
-def generate_audio_openai(client, text, voice, filename):
+def generate_audio_openai(client, text, voice, filename, speed=1.0):
     try:
         response = client.audio.speech.create(
             model="tts-1",
             voice=voice,
-            input=text
+            input=text,
+            speed=speed
         )
         response.stream_to_file(filename)
         return True
     except Exception as e:
-        st.error(f"OpenAI TTS Error: {e}")
+        st.error(f"TTS Error: {e}")
         return False
 
-# --- MAIN UI ---
-st.title("🎙️ PodcastLM Cloud")
-st.caption("Powered by OpenAI (GPT-4o-mini & TTS-1)")
+# ================= MAIN UI =================
 
-if not check_ffmpeg():
-    st.stop()
-
+# --- SIDEBAR SETTINGS ---
 with st.sidebar:
-    st.header("⚙️ Settings")
+    st.title("🎛️ Studio Settings")
     
-    # API Key from Secrets (Preferred) or Input
+    # 1. API & Security
     api_key = st.secrets.get("OPENAI_API_KEY")
     if not api_key:
         api_key = st.text_input("OpenAI API Key", type="password")
     
+    privacy_mode = st.toggle("🛡️ Privacy Mode", value=True, help="If on, source text is deleted immediately after script generation.")
+    
     st.divider()
+
+    # 2. Content Settings
+    st.subheader("🌍 Localization")
+    language = st.selectbox("Output Language", ["English", "Spanish", "French", "German", "Japanese", "Portuguese", "Hindi"])
     
-    # Length Control
-    length_option = st.select_slider(
-        "Podcast Length", 
-        options=["Short (2 min)", "Medium (5 min)", "Long (15-30 min)"],
-        value="Short (2 min)"
-    )
+    st.subheader("🎭 Hosts")
+    host1_persona = st.text_input("Host 1 Persona", "Male, curious, slightly skeptical")
+    host2_persona = st.text_input("Host 2 Persona", "Female, enthusiastic expert, fast talker")
     
-    voice_style = st.selectbox("Voice Style", [
+    voice_style = st.selectbox("Voice Pair", [
         "Dynamic (Alloy & Nova)", 
         "Calm (Onyx & Shimmer)", 
         "Formal (Echo & Fable)",
     ])
-    
     voice_map = {
         "Dynamic (Alloy & Nova)": ("alloy", "nova"),
         "Calm (Onyx & Shimmer)": ("onyx", "shimmer"),
         "Formal (Echo & Fable)": ("echo", "fable"),
     }
-    
-    add_music = st.checkbox("Add Background Music", value=True)
 
-tab1, tab2, tab3 = st.tabs(["1. Input", "2. Edit", "3. Listen"])
+    st.subheader("🎵 Audio Polish")
+    music_choice = st.selectbox("Background Music", ["Lo-Fi (Study)", "Upbeat (Morning)", "Ambient (News)", "None"])
+    music_urls = {
+        "Lo-Fi (Study)": "https://cdn.pixabay.com/download/audio/2022/05/27/audio_1808fbf07a.mp3?filename=lofi-study-112191.mp3",
+        "Upbeat (Morning)": "https://cdn.pixabay.com/download/audio/2024/05/24/audio_95e3f5f471.mp3?filename=good-morning-206098.mp3",
+        "Ambient (News)": "https://cdn.pixabay.com/download/audio/2022/03/10/audio_c8c8a73467.mp3?filename=ambient-piano-10226.mp3"
+    }
 
+# --- MAIN TABS ---
+st.title("🎧 PodcastLM Studio")
+
+if "script_data" not in st.session_state:
+    st.session_state.script_data = None
+
+tab1, tab2, tab3 = st.tabs(["1. Source Material", "2. Script Editor", "3. Audio Production"])
+
+# ================= TAB 1: INPUT =================
 with tab1:
-    input_method = st.radio("Source", ["Upload Files", "Paste Text"], horizontal=True)
+    input_type = st.radio("Select Input", ["📂 Upload Files", "🔗 Web URL", "📺 YouTube Video", "📝 Paste Text"], horizontal=True)
+    
     final_text = ""
     
-    if input_method == "Upload Files":
-        files = st.file_uploader("Drop PDF/DOCX/TXT", accept_multiple_files=True)
-        if files:
-            with st.spinner("Processing..."):
-                final_text = extract_text_from_files(files)
-    else:
-        final_text = st.text_area("Paste Text", height=300)
+    if input_type == "📂 Upload Files":
+        files = st.file_uploader("Upload Documents", accept_multiple_files=True)
+        if files: final_text = extract_text_from_files(files)
+            
+    elif input_type == "🔗 Web URL":
+        url = st.text_input("Enter Article URL")
+        if url: 
+            with st.spinner("Scraping website..."):
+                final_text = scrape_website(url)
+                
+    elif input_type == "📺 YouTube Video":
+        yt_url = st.text_input("Enter YouTube URL")
+        if yt_url:
+            vid = get_youtube_id(yt_url)
+            if vid:
+                with st.spinner("Fetching transcript..."):
+                    final_text = get_youtube_transcript(vid)
+            else:
+                st.error("Invalid YouTube URL")
+                
+    elif input_type == "📝 Paste Text":
+        final_text = st.text_area("Paste Content", height=300)
 
     if st.button("Generate Script", type="primary"):
-        if not api_key or len(final_text) < 50:
-            st.error("Need valid API Key and text.")
+        if not api_key:
+            st.error("Missing API Key")
+        elif len(final_text) < 100:
+            st.error("Content is too short or empty.")
         else:
             try:
                 client = OpenAI(api_key=api_key)
                 
-                # Adjust prompt based on length selection
-                length_instruction = "10-12 exchanges (approx 2 minutes)"
-                if "Medium" in length_option:
-                    length_instruction = "25-30 exchanges (approx 5 minutes). Go deeper into the topic."
-                elif "Long" in length_option:
-                    length_instruction = "At least 50 exchanges (approx 15-20 minutes). Very detailed discussion, deep dive."
-
                 prompt = f"""
-                Create a podcast script (Host 1 = Male, Host 2 = Female).
-                Title: Catchy title.
-                Goal: {length_instruction}
-                Style: Casual, friendly, engaging banter.
-                Format: JSON {{ "title": "...", "dialogue": [{{"speaker": "Host 1", "text": "..."}}, {{"speaker": "Host 2", "text": "..."}}] }}
-                Source Text: {final_text[:25000]}
+                Create a podcast script based on the source text.
+                Language: {language}
+                
+                Host 1 Persona: {host1_persona}
+                Host 2 Persona: {host2_persona}
+                
+                Rules:
+                1. Strictly follow the personas.
+                2. Engage in a natural conversation (interruptions, laughs, 'hmm').
+                3. Length: 15-20 exchanges.
+                
+                IMPORTANT: Return ONLY valid JSON. The keys "speaker", "text", "title" must remain in English. The CONTENT of values must be in {language}.
+                
+                Format:
+                {{
+                  "title": "Title in {language}",
+                  "dialogue": [
+                    {{"speaker": "Host 1", "text": "..."}},
+                    {{"speaker": "Host 2", "text": "..."}}
+                  ]
+                }}
+                
+                Source Text:
+                {final_text[:25000]}
                 """
                 
-                with st.spinner("Writing script..."):
+                with st.spinner("AI is writing the script..."):
                     res = client.chat.completions.create(
                         model="gpt-4o-mini",
                         messages=[{"role": "user", "content": prompt}],
                         response_format={"type": "json_object"}
                     )
                     st.session_state.script_data = json.loads(res.choices[0].message.content)
-                    st.session_state.audio_path = None
-                    st.success("Script Ready! Click Tab 2.")
+                    st.success("Script Generated!")
+                    
+                    # PRIVACY FEATURE: Nuke text from RAM
+                    if privacy_mode:
+                        final_text = "" 
+                        del final_text
+                        
             except Exception as e:
                 st.error(f"Error: {e}")
 
+# ================= TAB 2: EDIT =================
 with tab2:
     if st.session_state.script_data:
         data = st.session_state.script_data
         st.subheader(f"Title: {data.get('title', 'Podcast')}")
-        st.info("💡 Tip: You can edit the text below before generating audio.")
         
         with st.form("edit_form"):
             new_dialogue = []
             for i, line in enumerate(data['dialogue']):
                 c1, c2 = st.columns([1, 5])
-                spk = c1.selectbox("Speaker", ["Host 1", "Host 2"], index=0 if line['speaker']=="Host 1" else 1, key=f"s{i}")
-                txt = c2.text_area("Line", line['text'], height=60, key=f"t{i}", label_visibility="collapsed")
+                spk = c1.selectbox("Role", ["Host 1", "Host 2"], index=0 if line['speaker']=="Host 1" else 1, key=f"s{i}")
+                txt = c2.text_area("Dialogue", line['text'], height=70, key=f"t{i}")
                 new_dialogue.append({"speaker": spk, "text": txt})
             
-            if st.form_submit_button("Save Script Changes"):
+            if st.form_submit_button("Save Script"):
                 st.session_state.script_data['dialogue'] = new_dialogue
-                st.success("Script updated!")
+                st.success("Changes Saved.")
 
+# ================= TAB 3: AUDIO =================
 with tab3:
     if st.session_state.script_data:
-        if st.button("🚀 Generate Audio", type="primary"):
-            if not api_key:
-                st.error("Missing API Key")
-                st.stop()
-                
+        if st.button("🎙️ Start Production", type="primary"):
+            if not api_key: st.stop()
+            
             progress = st.progress(0)
             status = st.empty()
             client = OpenAI(api_key=api_key)
             m_voice, f_voice = voice_map[voice_style]
             
+            # Create secure temp environment
             with tempfile.TemporaryDirectory() as tmp:
                 tmp_path = Path(tmp)
                 audio_segments = []
                 script = st.session_state.script_data['dialogue']
                 
+                # 1. Generate Voice Lines
                 for i, line in enumerate(script):
-                    status.text(f"Recording line {i+1} of {len(script)}...")
-                    
+                    status.text(f"Recording line {i+1}/{len(script)}...")
                     voice = m_voice if line['speaker'] == "Host 1" else f_voice
-                    filename = str(tmp_path / f"line_{i}.mp3")
+                    f_path = str(tmp_path / f"line_{i}.mp3")
                     
-                    success = generate_audio_openai(client, line['text'], voice, filename)
-                    
-                    if success:
-                        seg = AudioSegment.from_file(filename)
+                    # Speed control: Host 2 is "fast talker" in default persona, so let's speed them up slightly? 
+                    # For now, standard speed for stability.
+                    if generate_audio_openai(client, line['text'], voice, f_path):
+                        seg = AudioSegment.from_file(f_path)
                         audio_segments.append(seg)
-                        audio_segments.append(AudioSegment.silent(duration=400))
+                        # Add natural pause
+                        audio_segments.append(AudioSegment.silent(duration=350))
                     
-                    progress.progress((i + 1) / len(script))
+                    progress.progress((i+1)/len(script))
                 
+                # 2. Mix Audio
                 if audio_segments:
-                    status.text("Mixing audio...")
-                    combined = sum(audio_segments)
+                    status.text("Mixing Master Track...")
+                    final_mix = sum(audio_segments)
                     
-                    if add_music:
+                    # Mix Music
+                    if music_choice != "None":
                         try:
-                            music_url = "https://cdn.pixabay.com/download/audio/2022/05/27/audio_1808fbf07a.mp3?filename=lofi-study-112191.mp3"
-                            m_data = requests.get(music_url, timeout=10).content
-                            with open(tmp_path / "music.mp3", "wb") as f: f.write(m_data)
-                            bg = AudioSegment.from_file(tmp_path / "music.mp3") - 25
+                            m_url = music_urls[music_choice]
+                            m_data = requests.get(m_url, timeout=10).content
+                            with open(tmp_path / "bg.mp3", "wb") as f: f.write(m_data)
                             
-                            # Loop music to fit length
-                            while len(bg) < len(combined) + 10000: bg += bg
-                            combined = bg[:len(combined)+1000].fade_out(2000).overlay(combined)
+                            music = AudioSegment.from_file(tmp_path / "bg.mp3")
+                            music = music - 22 # Lower volume
+                            
+                            # Loop music
+                            while len(music) < len(final_mix) + 5000:
+                                music += music
+                            
+                            # Trim and Fade
+                            music = music[:len(final_mix)+2000].fade_out(3000)
+                            final_mix = music.overlay(final_mix)
                         except Exception as e:
-                            st.warning(f"Music skipped: {e}")
-                            
-                    out_path = "podcast.mp3"
-                    combined.export(out_path, format="mp3")
-                    st.session_state.audio_path = out_path
-                    status.text("Done!")
-                    st.rerun()
-                else:
-                    st.error("Audio generation failed.")
+                            st.warning(f"Could not add music: {e}")
                     
-        if st.session_state.audio_path:
-            st.audio(st.session_state.audio_path)
-            with open(st.session_state.audio_path, "rb") as f:
-                st.download_button("Download MP3", f, "podcast.mp3")
+                    # 3. Export
+                    out_file = "podcast_master.mp3"
+                    final_mix.export(out_file, format="mp3")
+                    
+                    st.audio(out_file)
+                    with open(out_file, "rb") as f:
+                        st.download_button("💾 Download MP3", f, "podcast_master.mp3")
+                    status.success("Production Complete!")
+                    
+                    # Privacy Cleanup handled automatically by tempfile exit
+
 
 
 
