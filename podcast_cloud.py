@@ -50,46 +50,22 @@ if not st.session_state.authenticated:
 # ================= UTILS & SCRAPERS =================
 
 def get_youtube_id(url):
-    """
-    Robust YouTube ID extractor. 
-    Handles: standard url, short url, embed, and mobile.
-    """
-    # Pattern covers: youtube.com/watch?v=ID, youtu.be/ID, youtube.com/embed/ID
-    patterns = [
-        r'(?:v=|\/)([0-9A-Za-z_-]{11}).*',
-        r'(?:embed\/)([0-9A-Za-z_-]{11})',
-        r'(?:youtu\.be\/)([0-9A-Za-z_-]{11})'
-    ]
-    
-    for pattern in patterns:
-        match = re.search(pattern, url)
-        if match:
-            return match.group(1)
-            
-    return None
+    regex = r"(?:v=|\/)([0-9A-Za-z_-]{11}).*"
+    match = re.search(regex, url)
+    return match.group(1) if match else None
 
 def get_youtube_transcript(video_id):
-    """
-    Fetches transcript. Returns None if it fails so we don't hallucinate.
-    """
     try:
-        # Try to get manual transcripts first, fallback to auto-generated
         transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-        
-        # Prioritize English, but accept any available
+        # Try to fetch English, or fallback to any generated one
         try:
             transcript = transcript_list.find_generated_transcript(['en'])
         except:
-            # If no english, just take the first available
             transcript = transcript_list[0]
-            
-        # Fetch the actual data
-        data = transcript.fetch()
-        text = " ".join([t['text'] for t in data])
-        return text
         
+        data = transcript.fetch()
+        return " ".join([t['text'] for t in data])
     except Exception as e:
-        # Log this to console so you can debug in Streamlit Manage App
         print(f"YouTube Error: {e}")
         return None
 
@@ -148,11 +124,22 @@ with st.sidebar:
     
     st.divider()
 
-    st.subheader("🌍 Content")
-    language = st.selectbox("Output Language", ["English", "Spanish", "French", "German", "Japanese", "Portuguese", "Hindi"])
+    # --- LANGUAGE SUPPORT ---
+    st.subheader("🌍 Localization")
     
+    # Comprehensive Language List
+    language_options = [
+        "English (US)", "English (UK)", "Spanish (Spain)", "Spanish (LatAm)", 
+        "French", "German", "Italian", "Portuguese", "Portuguese (Brazil)",
+        "Japanese", "Chinese (Mandarin)", "Korean", "Hindi", "Arabic", "Russian",
+        "Turkish", "Dutch", "Polish", "Swedish", "Danish", "Norwegian", "Finnish",
+        "Greek", "Czech", "Romanian", "Indonesian", "Vietnamese", "Thai", "Hebrew"
+    ]
+    language = st.selectbox("Output Language", language_options)
+    
+    # --- LENGTH CONTROL ---
     length_option = st.select_slider(
-        "Duration", 
+        "Target Duration", 
         options=["Short (2 min)", "Medium (5 min)", "Long (15 min)", "Extra Long (30 min)"],
         value="Short (2 min)"
     )
@@ -227,33 +214,33 @@ with tab1:
     elif input_type == "📝 Paste Text":
         final_text = st.text_area("Paste Content", height=300)
 
-    # --- TEXT PREVIEW (DEBUGGING) ---
+    # --- TEXT PREVIEW ---
     if final_text:
-        with st.expander("👁️ View Extracted Source Text (Verify this before generating!)"):
+        with st.expander("👁️ View Extracted Source Text (Verify content)"):
             st.text_area("Source Preview", final_text, height=200, disabled=True)
 
     # --- GENERATE BUTTON ---
     if st.button("Generate Script", type="primary"):
         if not api_key:
             st.error("Missing API Key")
-        elif not final_text or len(final_text) < 100:
-            st.error("⚠️ No valid source text found. Please check the 'View Source Text' box above to ensure content was loaded.")
+        elif not final_text or len(final_text) < 50:
+            st.error("⚠️ No valid source text found.")
         else:
             try:
                 client = OpenAI(api_key=api_key)
                 
-                # Determine Length Instructions (Updated Logic)
+                # UPDATED DURATION LOGIC (Fixes short podcasts)
                 length_instr = "12-15 exchanges (approx 2-3 mins). Keep it punchy."
                 if "Medium" in length_option:
                     length_instr = "30 exchanges. Go deep into details. Use analogies."
                 elif "Long" in length_option:
-                    length_instr = "At least 50 exchanges. Deep Dive. Do not summarize quickly. Expand on every point."
+                    length_instr = "At least 50 exchanges. Deep Dive. Do not summarize quickly. Expand on every point significantly."
                 elif "Extra Long" in length_option:
-                    length_instr = "80-100 exchanges (approx 30 mins). Very detailed, comprehensive analysis."
+                    length_instr = "80-100 exchanges (approx 30 mins). Very detailed, comprehensive analysis. Cover every nuance."
 
                 prompt = f"""
                 Create a podcast script based on the source text.
-                Language: {language}
+                Target Language: {language}
                 Target Length: {length_instr}
                 
                 Host 1 Persona: {host1_persona}
@@ -264,7 +251,9 @@ with tab1:
                 2. Engage in a natural conversation (interruptions, laughs, 'hmm').
                 3. Structure: Intro -> Deep Dive -> Key Takeaways -> Outro.
                 
-                IMPORTANT: Return ONLY valid JSON. Keys (speaker, text, title) must be English. Values must be {language}.
+                IMPORTANT: Return ONLY valid JSON. 
+                - The Keys "speaker", "text", "title" must remain in ENGLISH. 
+                - The Values (the actual dialogue) must be in {language}.
                 
                 Format:
                 {{
@@ -276,7 +265,7 @@ with tab1:
                 }}
                 
                 Source Text:
-                {final_text[:30000]}
+                {final_text[:35000]}
                 """
                 
                 with st.spinner("AI is writing the script..."):
@@ -328,6 +317,7 @@ with tab3:
                 audio_segments = []
                 script = st.session_state.script_data['dialogue']
                 
+                # 1. Generate Voice Lines
                 for i, line in enumerate(script):
                     status.text(f"Recording line {i+1}/{len(script)}...")
                     voice = m_voice if line['speaker'] == "Host 1" else f_voice
@@ -340,6 +330,7 @@ with tab3:
                     
                     progress.progress((i+1)/len(script))
                 
+                # 2. Mix Audio
                 if audio_segments:
                     status.text("Mixing Master Track...")
                     final_mix = sum(audio_segments)
@@ -359,10 +350,22 @@ with tab3:
                         except Exception as e:
                             st.warning(f"Could not add music: {e}")
                     
-                    out_file = "podcast_master.mp3"
-                    final_mix.export(out_file, format="mp3")
+                    # 3. Export & Load to Memory (Fixes Pause/Resume)
+                    out_file = tmp_path / "podcast_master.mp3"
+                    final_mix.export(out_file, format="mp3", bitrate="192k")
                     
-                    st.audio(out_file)
                     with open(out_file, "rb") as f:
-                        st.download_button("💾 Download MP3", f, "podcast_master.mp3")
+                        audio_bytes = f.read()
+                    
                     status.success("Production Complete!")
+                    
+                    # Display Audio Player
+                    st.audio(audio_bytes, format="audio/mp3")
+                    
+                    # Download Button
+                    st.download_button(
+                        label="💾 Download MP3", 
+                        data=audio_bytes, 
+                        file_name="podcast_master.mp3",
+                        mime="audio/mp3"
+                    )
