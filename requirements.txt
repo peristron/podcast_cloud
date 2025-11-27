@@ -5,4 +5,5 @@ python-docx
 PyPDF2
 requests
 beautifulsoup4
-youtube-transcript-api
+yt-dlp
+
