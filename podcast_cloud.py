@@ -49,6 +49,23 @@ if not st.session_state.authenticated:
 
 # ================= UTILS & SCRAPERS =================
 
+def download_file_with_headers(url, save_path):
+    """Downloads a file using browser headers to avoid 403 blocks"""
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        response = requests.get(url, headers=headers, stream=True, timeout=15)
+        if response.status_code == 200:
+            with open(save_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            return True
+        return False
+    except Exception as e:
+        print(f"Download Error: {e}")
+        return False
+
 def download_and_transcribe_video(url, client):
     try:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -357,11 +374,13 @@ with tab3:
                     if bg_source != "None":
                         bg_segment = None
                         try:
-                            # Get the BG Audio
                             if bg_source == "Presets" and selected_bg_url:
-                                m_data = requests.get(selected_bg_url, timeout=10).content
-                                with open(tmp_path / "bg.mp3", "wb") as f: f.write(m_data)
-                                bg_segment = AudioSegment.from_file(tmp_path / "bg.mp3")
+                                # FIX: Use Headers to download Pixabay file
+                                bg_path = tmp_path / "bg.mp3"
+                                if download_file_with_headers(selected_bg_url, bg_path):
+                                    bg_segment = AudioSegment.from_file(bg_path)
+                                else:
+                                    st.warning("Could not download background music. Continuing without it.")
                             
                             elif bg_source == "Upload Custom" and uploaded_bg_file:
                                 with open(tmp_path / "bg_custom.mp3", "wb") as f: f.write(uploaded_bg_file.getvalue())
@@ -370,10 +389,8 @@ with tab3:
                             # Process BG (Loop & Duck)
                             if bg_segment:
                                 bg_segment = bg_segment - 22 # Lower Volume
-                                # Loop until it covers the dialogue
                                 while len(bg_segment) < len(dialogue_track) + 5000:
                                     bg_segment += bg_segment
-                                # Trim to dialogue length + fade
                                 bg_segment = bg_segment[:len(dialogue_track)+2000].fade_out(3000)
                                 dialogue_track = bg_segment.overlay(dialogue_track)
                         
@@ -384,14 +401,12 @@ with tab3:
                     final_mix = dialogue_track
                     
                     try:
-                        # Add Intro
                         if uploaded_intro:
                             status.text("Adding Intro...")
                             with open(tmp_path / "intro.mp3", "wb") as f: f.write(uploaded_intro.getvalue())
                             intro_seg = AudioSegment.from_file(tmp_path / "intro.mp3")
                             final_mix = intro_seg + final_mix
                         
-                        # Add Outro
                         if uploaded_outro:
                             status.text("Adding Outro...")
                             with open(tmp_path / "outro.mp3", "wb") as f: f.write(uploaded_outro.getvalue())
