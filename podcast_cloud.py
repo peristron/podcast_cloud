@@ -26,7 +26,7 @@ from openai import OpenAI
 
 # ================= CONFIGURATION =================
 st.set_page_config(
-    page_title="PodcastLM Studio", 
+    page_title="PodcastLM Studio - OS Team testing", 
     page_icon="🎧", 
     layout="wide",
     initial_sidebar_state="expanded"
@@ -207,7 +207,7 @@ with st.sidebar:
         uploaded_outro = st.file_uploader("Outro (Plays Once)", type=["mp3", "wav"])
 
 # ================= MAIN APP =================
-st.title("🎧 PodcastLM Studio")
+st.title("🎧 PodcastLM Studio - OS Team Testing")
 
 tab1, tab2, tab3, tab4 = st.tabs(["1. Source Material", "2. 🤖 AI Research Assistant", "3. Script Editor", "4. Audio Production"])
 
@@ -427,6 +427,7 @@ with tab4:
                 status.success("Done!")
                 st.audio(ab, format="audio/mp3")
                 st.download_button("Download MP3", ab, "podcast.mp3", "audio/mp3")
+
 
 
 
