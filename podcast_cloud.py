@@ -51,13 +51,11 @@ if not st.session_state.authenticated:
 
 def download_and_transcribe_video(url, client):
     """
-    Universal Video Handler:
-    1. Uses yt-dlp to download audio from Rumble/Odysee/YouTube/etc.
-    2. Uses OpenAI Whisper to transcribe audio to text.
+    Universal Video Handler with Anti-Bot Headers
     """
     try:
         with tempfile.TemporaryDirectory() as tmp_dir:
-            # Configure yt-dlp to download audio only (fastest)
+            # Configure yt-dlp with headers to look like a real browser
             ydl_opts = {
                 'format': 'bestaudio/best',
                 'outtmpl': os.path.join(tmp_dir, 'audio.%(ext)s'),
@@ -68,9 +66,15 @@ def download_and_transcribe_video(url, client):
                 }],
                 'quiet': True,
                 'no_warnings': True,
+                'nocheckcertificate': True,
+                'http_headers': {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Accept-Language': 'en-us,en;q=0.5',
+                }
             }
             
-            st.info("⏳ Downloading audio from video URL... (This supports Rumble, Odysee, etc.)")
+            st.info("⏳ Attempting to download audio... (If this fails, use the 'Upload Files' option instead)")
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([url])
             
@@ -78,12 +82,12 @@ def download_and_transcribe_video(url, client):
             audio_path = os.path.join(tmp_dir, "audio.mp3")
             
             if not os.path.exists(audio_path):
-                return None, "Download failed. The site might be blocking automated requests."
+                return None, "Download failed. The site blocked the request (403 Error)."
 
             # Check file size (OpenAI limit is 25MB)
             file_size_mb = os.path.getsize(audio_path) / (1024 * 1024)
             if file_size_mb > 24:
-                return None, "Video audio is too long (>25MB). Please use a shorter video."
+                return None, "Audio is too large (>25MB). Please use a shorter video or upload a compressed file."
 
             st.info("📝 Transcribing audio with OpenAI Whisper...")
             with open(audio_path, "rb") as audio_file:
@@ -108,11 +112,13 @@ def scrape_website(url):
     except Exception as e:
         return None
 
-def extract_text_from_files(files):
+def extract_text_from_files(files, client=None):
     text = ""
     for file in files:
         try:
             name = file.name.lower()
+            
+            # 1. Text/Document Handling
             if name.endswith(".pdf"):
                 reader = PyPDF2.PdfReader(file)
                 for page in reader.pages: text += page.extract_text() + "\n"
@@ -121,7 +127,28 @@ def extract_text_from_files(files):
                 for para in doc.paragraphs: text += para.text + "\n"
             elif name.endswith(".txt"):
                 text = file.getvalue().decode("utf-8")
-        except: pass
+            
+            # 2. Audio/Video Handling (Whisper)
+            elif name.endswith((".mp3", ".mp4", ".wav", ".m4a", ".mpeg", ".mpga", ".webm")):
+                if client:
+                    with st.spinner(f"Transcribing {name}..."):
+                        # Save to temp file for API upload
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(name)[1]) as tmp_file:
+                            tmp_file.write(file.getvalue())
+                            tmp_path = tmp_file.name
+                        
+                        with open(tmp_path, "rb") as audio_file:
+                            transcript = client.audio.transcriptions.create(
+                                model="whisper-1", 
+                                file=audio_file
+                            )
+                        text += transcript.text + "\n"
+                        os.remove(tmp_path) # Clean up
+                else:
+                    st.warning(f"Skipped {name}: API Key required for transcription.")
+
+        except Exception as e:
+            st.error(f"Error reading {file.name}: {e}")
     return text
 
 def generate_audio_openai(client, text, voice, filename, speed=1.0):
@@ -154,7 +181,6 @@ with st.sidebar:
 
     # --- LANGUAGE SUPPORT ---
     st.subheader("🌍 Localization")
-    
     language_options = [
         "English (US)", "English (UK)", "Spanish (Spain)", "Spanish (LatAm)", 
         "French", "German", "Italian", "Portuguese", "Portuguese (Brazil)",
@@ -204,15 +230,26 @@ tab1, tab2, tab3 = st.tabs(["1. Source Material", "2. Script Editor", "3. Audio 
 
 # ================= TAB 1: INPUT =================
 with tab1:
-    # Renamed option to reflect universal support
-    input_type = st.radio("Select Input", ["📂 Upload Files", "🔗 Web URL", "📺 Video URL (Rumble/Odysee/YouTube)", "📝 Paste Text"], horizontal=True)
+    input_type = st.radio(
+        "Select Input", 
+        ["📂 Upload Files (PDF/Docs/Audio/Video)", "🔗 Web URL", "📺 Video URL (Download)", "📝 Paste Text"], 
+        horizontal=True
+    )
     
     final_text = ""
     
     # --- INPUT LOGIC ---
-    if input_type == "📂 Upload Files":
-        files = st.file_uploader("Upload Documents", accept_multiple_files=True)
-        if files: final_text = extract_text_from_files(files)
+    if input_type == "📂 Upload Files (PDF/Docs/Audio/Video)":
+        st.caption("Supports: PDF, DOCX, TXT. Also supports Audio/Video (MP3, MP4, etc.) via OpenAI Whisper.")
+        files = st.file_uploader("Upload Files", accept_multiple_files=True)
+        
+        if files: 
+            if api_key:
+                client = OpenAI(api_key=api_key)
+                final_text = extract_text_from_files(files, client)
+            else:
+                # Fallback for text-only if no key yet
+                final_text = extract_text_from_files(files, None)
             
     elif input_type == "🔗 Web URL":
         url = st.text_input("Enter Article URL")
@@ -224,9 +261,9 @@ with tab1:
                 else:
                     st.error("Could not scrape this website. It might be blocked.")
                 
-    elif input_type == "📺 Video URL (Rumble/Odysee/YouTube)":
+    elif input_type == "📺 Video URL (Download)":
         vid_url = st.text_input("Enter Video URL (Rumble, Odysee, etc.)")
-        st.caption("Note: This downloads the audio and transcribes it using OpenAI Whisper. It may take a minute.")
+        st.caption("Note: If this fails with a 403 Error, download the video manually and use 'Upload Files' instead.")
         
         if vid_url and st.button("Process Video"):
             if not api_key:
@@ -236,12 +273,11 @@ with tab1:
                 text, error = download_and_transcribe_video(vid_url, client)
                 if text:
                     final_text = text
-                    st.session_state.video_text_cache = text # Cache it so it doesn't reload on refresh
+                    st.session_state.video_text_cache = text 
                     st.success("Video Transcribed Successfully!")
                 else:
-                    st.error(f"Error processing video: {error}")
+                    st.error(f"Error: {error}")
         
-        # Retrieve from cache if available (prevents re-downloading on button clicks)
         if "video_text_cache" in st.session_state and not final_text:
             final_text = st.session_state.video_text_cache
 
@@ -263,7 +299,6 @@ with tab1:
             try:
                 client = OpenAI(api_key=api_key)
                 
-                # UPDATED DURATION LOGIC
                 length_instr = "12-15 exchanges (approx 2-3 mins). Keep it punchy."
                 if "Medium" in length_option:
                     length_instr = "30 exchanges. Go deep into details. Use analogies."
