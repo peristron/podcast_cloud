@@ -17,7 +17,7 @@ from pydub import AudioSegment
 import PyPDF2
 import docx
 from bs4 import BeautifulSoup
-from youtube_transcript_api import YouTubeTranscriptApi
+import yt_dlp
 
 # --- AI CLIENT ---
 from openai import OpenAI
@@ -49,25 +49,53 @@ if not st.session_state.authenticated:
 
 # ================= UTILS & SCRAPERS =================
 
-def get_youtube_id(url):
-    regex = r"(?:v=|\/)([0-9A-Za-z_-]{11}).*"
-    match = re.search(regex, url)
-    return match.group(1) if match else None
-
-def get_youtube_transcript(video_id):
+def download_and_transcribe_video(url, client):
+    """
+    Universal Video Handler:
+    1. Uses yt-dlp to download audio from Rumble/Odysee/YouTube/etc.
+    2. Uses OpenAI Whisper to transcribe audio to text.
+    """
     try:
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-        # Try to fetch English, or fallback to any generated one
-        try:
-            transcript = transcript_list.find_generated_transcript(['en'])
-        except:
-            transcript = transcript_list[0]
-        
-        data = transcript.fetch()
-        return " ".join([t['text'] for t in data])
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            # Configure yt-dlp to download audio only (fastest)
+            ydl_opts = {
+                'format': 'bestaudio/best',
+                'outtmpl': os.path.join(tmp_dir, 'audio.%(ext)s'),
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'mp3',
+                    'preferredquality': '128',
+                }],
+                'quiet': True,
+                'no_warnings': True,
+            }
+            
+            st.info("⏳ Downloading audio from video URL... (This supports Rumble, Odysee, etc.)")
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
+            
+            # Find the file
+            audio_path = os.path.join(tmp_dir, "audio.mp3")
+            
+            if not os.path.exists(audio_path):
+                return None, "Download failed. The site might be blocking automated requests."
+
+            # Check file size (OpenAI limit is 25MB)
+            file_size_mb = os.path.getsize(audio_path) / (1024 * 1024)
+            if file_size_mb > 24:
+                return None, "Video audio is too long (>25MB). Please use a shorter video."
+
+            st.info("📝 Transcribing audio with OpenAI Whisper...")
+            with open(audio_path, "rb") as audio_file:
+                transcript = client.audio.transcriptions.create(
+                    model="whisper-1", 
+                    file=audio_file
+                )
+            
+            return transcript.text, None
+
     except Exception as e:
-        print(f"YouTube Error: {e}")
-        return None
+        return None, str(e)
 
 def scrape_website(url):
     try:
@@ -127,7 +155,6 @@ with st.sidebar:
     # --- LANGUAGE SUPPORT ---
     st.subheader("🌍 Localization")
     
-    # Added Urdu to the list
     language_options = [
         "English (US)", "English (UK)", "Spanish (Spain)", "Spanish (LatAm)", 
         "French", "German", "Italian", "Portuguese", "Portuguese (Brazil)",
@@ -177,7 +204,8 @@ tab1, tab2, tab3 = st.tabs(["1. Source Material", "2. Script Editor", "3. Audio 
 
 # ================= TAB 1: INPUT =================
 with tab1:
-    input_type = st.radio("Select Input", ["📂 Upload Files", "🔗 Web URL", "📺 YouTube Video", "📝 Paste Text"], horizontal=True)
+    # Renamed option to reflect universal support
+    input_type = st.radio("Select Input", ["📂 Upload Files", "🔗 Web URL", "📺 Video URL (Rumble/Odysee/YouTube)", "📝 Paste Text"], horizontal=True)
     
     final_text = ""
     
@@ -196,21 +224,27 @@ with tab1:
                 else:
                     st.error("Could not scrape this website. It might be blocked.")
                 
-    elif input_type == "📺 YouTube Video":
-        yt_url = st.text_input("Enter YouTube URL")
-        if yt_url:
-            vid = get_youtube_id(yt_url)
-            if vid:
-                with st.spinner("Fetching transcript..."):
-                    transcript = get_youtube_transcript(vid)
-                    if transcript:
-                        final_text = transcript
-                        st.success("Transcript fetched successfully!")
-                    else:
-                        st.error("❌ Could not retrieve transcript. The video might not have captions, or the server was blocked.")
+    elif input_type == "📺 Video URL (Rumble/Odysee/YouTube)":
+        vid_url = st.text_input("Enter Video URL (Rumble, Odysee, etc.)")
+        st.caption("Note: This downloads the audio and transcribes it using OpenAI Whisper. It may take a minute.")
+        
+        if vid_url and st.button("Process Video"):
+            if not api_key:
+                st.error("API Key required for transcription.")
             else:
-                st.error("Invalid YouTube URL")
-                
+                client = OpenAI(api_key=api_key)
+                text, error = download_and_transcribe_video(vid_url, client)
+                if text:
+                    final_text = text
+                    st.session_state.video_text_cache = text # Cache it so it doesn't reload on refresh
+                    st.success("Video Transcribed Successfully!")
+                else:
+                    st.error(f"Error processing video: {error}")
+        
+        # Retrieve from cache if available (prevents re-downloading on button clicks)
+        if "video_text_cache" in st.session_state and not final_text:
+            final_text = st.session_state.video_text_cache
+
     elif input_type == "📝 Paste Text":
         final_text = st.text_area("Paste Content", height=300)
 
@@ -279,6 +313,8 @@ with tab1:
                     
                     if privacy_mode:
                         final_text = "" 
+                        if "video_text_cache" in st.session_state:
+                             del st.session_state.video_text_cache
                         
             except Exception as e:
                 st.error(f"Error: {e}")
@@ -354,7 +390,6 @@ with tab3:
                     out_file = tmp_path / "podcast_master.mp3"
                     final_mix.export(out_file, format="mp3", bitrate="192k")
                     
-                    # Read into memory to fix playback issues
                     with open(out_file, "rb") as f:
                         audio_bytes = f.read()
                     
