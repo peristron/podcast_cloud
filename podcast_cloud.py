@@ -26,7 +26,7 @@ from openai import OpenAI
 
 # ================= CONFIGURATION =================
 st.set_page_config(
-    page_title="PodcastLM Studio - OS Team testing", 
+    page_title="PodcastLM Studio - OS Team Testing", 
     page_icon="🎧", 
     layout="wide",
     initial_sidebar_state="expanded"
@@ -41,8 +41,6 @@ if "source_text" not in st.session_state:
     st.session_state.source_text = ""
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
-
-# NEW: Persistent Notebook State
 if "notebook_content" not in st.session_state:
     st.session_state.notebook_content = f"# 📓 Research Notebook\n**Session Started:** {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
 
@@ -220,8 +218,10 @@ with tab1:
     if input_type == "📂 Files":
         files = st.file_uploader("Upload", accept_multiple_files=True)
         if files and st.button("Process Files"):
-            client = OpenAI(api_key=api_key) if api_key else None
-            new_text = extract_text_from_files(files, client)
+            # ADDED: Visual Loading Indicator
+            with st.spinner("Processing uploaded files..."):
+                client = OpenAI(api_key=api_key) if api_key else None
+                new_text = extract_text_from_files(files, client)
             
     elif input_type == "🔗 Web URL":
         url = st.text_input("Enter Article URL")
@@ -236,19 +236,20 @@ with tab1:
         if vid_url and st.button("Transcribe"):
             if api_key:
                 client = OpenAI(api_key=api_key)
-                text, err = download_and_transcribe_video(vid_url, client)
-                if text: new_text = text
-                else: st.error(err)
+                with st.spinner("Downloading and Transcribing Video..."):
+                    text, err = download_and_transcribe_video(vid_url, client)
+                    if text: new_text = text
+                    else: st.error(err)
+            else: st.error("API Key Required")
     
     elif input_type == "📝 Text":
         new_text = st.text_area("Paste Text", height=300)
 
-    # Logic: If new text is loaded, we log it in the notebook but reset the ACTIVE chat context
+    # Update State
     if new_text and new_text != st.session_state.source_text:
         st.session_state.source_text = new_text
         st.session_state.chat_history = [] 
         
-        # Log this event to the persistent notebook
         timestamp = datetime.now().strftime("%H:%M:%S")
         st.session_state.notebook_content += f"\n---\n### 📥 New Source Loaded ({timestamp})\n*Source Type: {input_type}*\n\n"
         
@@ -262,22 +263,17 @@ with tab1:
 with tab2:
     col_chat, col_notes = st.columns([1, 1])
     
-    # LEFT COLUMN: Active Chat
     with col_chat:
         st.subheader("💬 Active Chat")
         if not st.session_state.source_text:
             st.warning("Load source text first.")
         else:
-            # Display Chat History
             for message in st.session_state.chat_history:
                 with st.chat_message(message["role"]): st.markdown(message["content"])
             
             if prompt := st.chat_input("Ask a question..."):
                 if api_key:
-                    # Add User Q to Chat
                     st.session_state.chat_history.append({"role": "user", "content": prompt})
-                    
-                    # Add User Q to Notebook
                     st.session_state.notebook_content += f"**Q:** {prompt}\n\n"
                     
                     with st.chat_message("user"): st.markdown(prompt)
@@ -293,34 +289,19 @@ with tab2:
                             ], stream=True)
                         response = st.write_stream(stream)
                     
-                    # Add AI A to Chat & Notebook
                     st.session_state.chat_history.append({"role": "assistant", "content": response})
                     st.session_state.notebook_content += f"**A:** {response}\n\n"
-                    st.rerun() # Rerun to update the notebook view on the right
+                    st.rerun()
 
-    # RIGHT COLUMN: Persistent Notebook
     with col_notes:
         st.subheader("📓 Research Notebook")
-        st.caption("This notebook auto-saves your Q&A session. You can also edit it manually.")
+        st.caption("Auto-saves Q&A. Editable.")
         
-        # Editable Notebook Area
-        updated_notebook = st.text_area(
-            "Notebook Content", 
-            value=st.session_state.notebook_content, 
-            height=600,
-            key="notebook_area"
-        )
-        
-        # Sync manual edits back to state
+        updated_notebook = st.text_area("Notebook Content", value=st.session_state.notebook_content, height=600, key="notebook_area")
         if updated_notebook != st.session_state.notebook_content:
             st.session_state.notebook_content = updated_notebook
         
-        st.download_button(
-            label="💾 Save Notebook (.md)",
-            data=st.session_state.notebook_content,
-            file_name=f"research_notebook_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
-            mime="text/markdown"
-        )
+        st.download_button("💾 Save Notebook (.md)", st.session_state.notebook_content, f"notebook_{datetime.now().strftime('%Y%m%d_%H%M')}.md")
 
 # --- TAB 3: SCRIPT ---
 with tab3:
@@ -395,7 +376,7 @@ with tab4:
                 status.text("Mixing...")
                 final = sum(segs)
                 
-                # Music Logic with Ramp Up
+                # Music Logic
                 bg_seg = None
                 try:
                     if bg_source == "Presets" and selected_bg_url:
@@ -427,6 +408,7 @@ with tab4:
                 status.success("Done!")
                 st.audio(ab, format="audio/mp3")
                 st.download_button("Download MP3", ab, "podcast.mp3", "audio/mp3")
+
 
 
 
