@@ -3,7 +3,6 @@
 #                  directory setup: cd C:\users\oakhtar\documents\pyprojs_local
 #   OPTIMIZED for deployment -
 #
-
 import streamlit as st
 import os
 import tempfile
@@ -27,7 +26,7 @@ from openai import OpenAI
 st.set_page_config(
     page_title="PodcastLM Studio", 
     page_icon="🎧", 
-    layout="wide", # Switched to wide for better editing
+    layout="wide",
     initial_sidebar_state="expanded"
 )
 
@@ -50,13 +49,7 @@ if not st.session_state.authenticated:
 
 # ================= UTILS & SCRAPERS =================
 
-def clean_memory():
-    """Security: Explicitly deletes large text variables from session state"""
-    if "extracted_text" in st.session_state:
-        del st.session_state.extracted_text
-    
 def get_youtube_id(url):
-    """Extracts Video ID from YouTube URL"""
     regex = r"(?:v=|\/)([0-9A-Za-z_-]{11}).*"
     match = re.search(regex, url)
     return match.group(1) if match else None
@@ -74,7 +67,6 @@ def scrape_website(url):
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         response = requests.get(url, headers=headers, timeout=10)
         soup = BeautifulSoup(response.content, 'html.parser')
-        # Kill scripts and styles
         for script in soup(["script", "style", "header", "footer", "nav"]):
             script.decompose()
         return soup.get_text()
@@ -127,9 +119,15 @@ with st.sidebar:
     st.divider()
 
     # 2. Content Settings
-    st.subheader("🌍 Localization")
+    st.subheader("🌍 Content")
     language = st.selectbox("Output Language", ["English", "Spanish", "French", "German", "Japanese", "Portuguese", "Hindi"])
     
+    length_option = st.select_slider(
+        "Duration", 
+        options=["Short (2 min)", "Medium (5 min)", "Long (15 min)"],
+        value="Short (2 min)"
+    )
+
     st.subheader("🎭 Hosts")
     host1_persona = st.text_input("Host 1 Persona", "Male, curious, slightly skeptical")
     host2_persona = st.text_input("Host 2 Persona", "Female, enthusiastic expert, fast talker")
@@ -199,9 +197,17 @@ with tab1:
             try:
                 client = OpenAI(api_key=api_key)
                 
+                # Determine Length Instructions
+                length_instr = "12-15 exchanges (approx 2-3 mins)"
+                if "Medium" in length_option:
+                    length_instr = "25-30 exchanges (approx 5-7 mins). Go deep into details."
+                elif "Long" in length_option:
+                    length_instr = "45-50 exchanges (approx 15 mins). Extensive discussion."
+
                 prompt = f"""
                 Create a podcast script based on the source text.
                 Language: {language}
+                Target Length: {length_instr}
                 
                 Host 1 Persona: {host1_persona}
                 Host 2 Persona: {host2_persona}
@@ -209,9 +215,9 @@ with tab1:
                 Rules:
                 1. Strictly follow the personas.
                 2. Engage in a natural conversation (interruptions, laughs, 'hmm').
-                3. Length: 15-20 exchanges.
+                3. Structure: Intro -> Deep Dive -> Key Takeaways -> Outro.
                 
-                IMPORTANT: Return ONLY valid JSON. The keys "speaker", "text", "title" must remain in English. The CONTENT of values must be in {language}.
+                IMPORTANT: Return ONLY valid JSON. Keys (speaker, text, title) must be English. Values must be {language}.
                 
                 Format:
                 {{
@@ -223,7 +229,7 @@ with tab1:
                 }}
                 
                 Source Text:
-                {final_text[:25000]}
+                {final_text[:30000]}
                 """
                 
                 with st.spinner("AI is writing the script..."):
@@ -235,7 +241,6 @@ with tab1:
                     st.session_state.script_data = json.loads(res.choices[0].message.content)
                     st.success("Script Generated!")
                     
-                    # PRIVACY FEATURE: Nuke text from RAM
                     if privacy_mode:
                         final_text = "" 
                         del final_text
@@ -272,34 +277,27 @@ with tab3:
             client = OpenAI(api_key=api_key)
             m_voice, f_voice = voice_map[voice_style]
             
-            # Create secure temp environment
             with tempfile.TemporaryDirectory() as tmp:
                 tmp_path = Path(tmp)
                 audio_segments = []
                 script = st.session_state.script_data['dialogue']
                 
-                # 1. Generate Voice Lines
                 for i, line in enumerate(script):
                     status.text(f"Recording line {i+1}/{len(script)}...")
                     voice = m_voice if line['speaker'] == "Host 1" else f_voice
                     f_path = str(tmp_path / f"line_{i}.mp3")
                     
-                    # Speed control: Host 2 is "fast talker" in default persona, so let's speed them up slightly? 
-                    # For now, standard speed for stability.
                     if generate_audio_openai(client, line['text'], voice, f_path):
                         seg = AudioSegment.from_file(f_path)
                         audio_segments.append(seg)
-                        # Add natural pause
                         audio_segments.append(AudioSegment.silent(duration=350))
                     
                     progress.progress((i+1)/len(script))
                 
-                # 2. Mix Audio
                 if audio_segments:
                     status.text("Mixing Master Track...")
                     final_mix = sum(audio_segments)
                     
-                    # Mix Music
                     if music_choice != "None":
                         try:
                             m_url = music_urls[music_choice]
@@ -307,19 +305,14 @@ with tab3:
                             with open(tmp_path / "bg.mp3", "wb") as f: f.write(m_data)
                             
                             music = AudioSegment.from_file(tmp_path / "bg.mp3")
-                            music = music - 22 # Lower volume
-                            
-                            # Loop music
+                            music = music - 22
                             while len(music) < len(final_mix) + 5000:
                                 music += music
-                            
-                            # Trim and Fade
                             music = music[:len(final_mix)+2000].fade_out(3000)
                             final_mix = music.overlay(final_mix)
                         except Exception as e:
                             st.warning(f"Could not add music: {e}")
                     
-                    # 3. Export
                     out_file = "podcast_master.mp3"
                     final_mix.export(out_file, format="mp3")
                     
@@ -327,12 +320,3 @@ with tab3:
                     with open(out_file, "rb") as f:
                         st.download_button("💾 Download MP3", f, "podcast_master.mp3")
                     status.success("Production Complete!")
-                    
-                    # Privacy Cleanup handled automatically by tempfile exit
-
-
-
-
-
-
-
