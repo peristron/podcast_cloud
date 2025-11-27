@@ -12,6 +12,7 @@ import shutil
 import re
 from pathlib import Path
 from pydub import AudioSegment
+from pydub.effects import high_pass_filter, low_pass_filter
 from datetime import datetime
 
 # --- TEXT PROCESSING ---
@@ -26,7 +27,7 @@ from openai import OpenAI
 
 # ================= CONFIGURATION =================
 st.set_page_config(
-    page_title="PodcastLM Studio - OS Team Testing", 
+    page_title="PodcastLM Studio", 
     page_icon="🎧", 
     layout="wide",
     initial_sidebar_state="expanded"
@@ -183,8 +184,7 @@ with st.sidebar:
     st.subheader("🎵 Music & Branding")
     
     bg_source = st.radio("Background Music", ["Presets", "Upload Custom", "None"], horizontal=True)
-    
-    music_ramp_up = st.checkbox("🎵 Start Music 5s Before Dialogue", value=False, help="Creates a 'Cold Open' effect using the background music.")
+    music_ramp_up = st.checkbox("🎵 Start Music 5s Before Dialogue", value=False)
 
     selected_bg_url = None
     uploaded_bg_file = None
@@ -205,7 +205,7 @@ with st.sidebar:
         uploaded_outro = st.file_uploader("Outro (Plays Once)", type=["mp3", "wav"])
 
 # ================= MAIN APP =================
-st.title("🎧 PodcastLM Studio - OS Team Testing")
+st.title("🎧 PodcastLM Studio")
 
 tab1, tab2, tab3, tab4 = st.tabs(["1. Source Material", "2. 🤖 AI Research Assistant", "3. Script Editor", "4. Audio Production"])
 
@@ -255,18 +255,15 @@ with tab1:
         with st.expander("View Source Text"):
             st.text_area("Content", st.session_state.source_text, height=150, disabled=True)
 
-# --- TAB 2: CHAT & NOTEBOOK ---
+# --- TAB 2: CHAT ---
 with tab2:
     col_chat, col_notes = st.columns([1, 1])
-    
     with col_chat:
         st.subheader("💬 Active Chat")
-        if not st.session_state.source_text:
-            st.warning("Load source text first.")
+        if not st.session_state.source_text: st.warning("Load source text first.")
         else:
             for message in st.session_state.chat_history:
                 with st.chat_message(message["role"]): st.markdown(message["content"])
-            
             if prompt := st.chat_input("Ask a question..."):
                 if api_key:
                     st.session_state.chat_history.append({"role": "user", "content": prompt})
@@ -290,17 +287,27 @@ with tab2:
         st.subheader("📓 Research Notebook")
         st.caption("Auto-saves Q&A. Editable.")
         updated_notebook = st.text_area("Notebook Content", value=st.session_state.notebook_content, height=600, key="notebook_area")
-        if updated_notebook != st.session_state.notebook_content:
-            st.session_state.notebook_content = updated_notebook
+        if updated_notebook != st.session_state.notebook_content: st.session_state.notebook_content = updated_notebook
         st.download_button("💾 Save Notebook (.md)", st.session_state.notebook_content, f"notebook_{datetime.now().strftime('%Y%m%d_%H%M')}.md")
 
 # --- TAB 3: SCRIPT ---
 with tab3:
     st.markdown("### 🎬 Director Mode")
-    user_instructions = st.text_area(
-        "📢 Custom Direction / Focus Area", 
-        placeholder="e.g., 'Focus on the financial aspects', 'Make it very funny', 'Explain like I'm 5', 'Debate the pros and cons'"
-    )
+    col_dir, col_call = st.columns([1, 1])
+    
+    with col_dir:
+        user_instructions = st.text_area(
+            "📢 Custom Instructions", 
+            placeholder="e.g., 'Focus on the financial aspects', 'Make it funny'"
+        )
+        
+    with col_call:
+        st.markdown("#### 📞 Call-in Segment")
+        caller_prompt = st.text_area(
+            "Listener Question/Comment",
+            placeholder="Type a question here. E.g., 'Hey, I disagree with your point about X...'"
+        )
+        st.caption("If filled, a 'Caller' will interrupt the show with this question.")
 
     if st.button("Generate Podcast Script", type="primary"):
         if not api_key or not st.session_state.source_text: st.error("Missing Key or Text")
@@ -312,6 +319,15 @@ with tab3:
                 elif "Long" in length_option: length_instr = "50 exchanges. Very detailed."
                 elif "Extra Long" in length_option: length_instr = "80 exchanges. Comprehensive."
 
+                call_in_instr = ""
+                if caller_prompt:
+                    call_in_instr = f"""
+                    MANDATORY: Halfway through the script, include a 'Listener Call-in' segment.
+                    The speaker label must be "Caller".
+                    The Caller says: "{caller_prompt}".
+                    Host 1 and Host 2 must react to this call and debate the caller's point.
+                    """
+
                 prompt = f"""
                 Create a podcast script.
                 Language: {language}
@@ -319,9 +335,10 @@ with tab3:
                 Host 1: {host1_persona}
                 Host 2: {host2_persona}
                 
-                SPECIAL USER DIRECTION: {user_instructions} (Prioritize this instruction above all else).
+                DIRECTOR NOTES: {user_instructions}
+                {call_in_instr}
                 
-                Format: JSON {{ "title": "...", "dialogue": [ {{"speaker": "Host 1", "text": "..."}} ] }}
+                Format: JSON {{ "title": "...", "dialogue": [ {{"speaker": "Host 1", "text": "..."}}, {{"speaker": "Caller", "text": "..."}} ] }}
                 Text: {st.session_state.source_text[:35000]}
                 """
                 
@@ -341,7 +358,15 @@ with tab3:
             new_d = []
             for i, l in enumerate(data['dialogue']):
                 c1, c2 = st.columns([1, 5])
-                spk = c1.selectbox("Role", ["Host 1", "Host 2"], index=0 if l['speaker']=="Host 1" else 1, key=f"s{i}")
+                # Add "Caller" to the dropdown options if it appears
+                roles = ["Host 1", "Host 2"]
+                if l['speaker'] == "Caller": roles.append("Caller")
+                
+                idx = 0
+                if l['speaker'] == "Host 2": idx = 1
+                elif l['speaker'] == "Caller": idx = 2
+                
+                spk = c1.selectbox("Role", roles, index=idx if idx < len(roles) else 0, key=f"s{i}")
                 txt = c2.text_area("Line", l['text'], height=70, key=f"t{i}")
                 new_d.append({"speaker": spk, "text": txt})
             if st.form_submit_button("Save"):
@@ -365,10 +390,22 @@ with tab4:
             
             for i, line in enumerate(script):
                 status.text(f"Recording {i+1}/{len(script)}...")
-                voice = m_voice if line['speaker'] == "Host 1" else f_voice
+                
+                # Voice Selection Logic
+                voice = m_voice
+                if line['speaker'] == "Host 2": voice = f_voice
+                elif line['speaker'] == "Caller": voice = "fable" # Distinct voice for caller
+                
                 f_path = str(tmp_path / f"line_{i}.mp3")
                 if generate_audio_openai(client, line['text'], voice, f_path):
-                    segs.append(AudioSegment.from_file(f_path))
+                    seg = AudioSegment.from_file(f_path)
+                    
+                    # Apply Telephone FX if Caller
+                    if line['speaker'] == "Caller":
+                        seg = high_pass_filter(seg, 300)
+                        seg = low_pass_filter(seg, 3000)
+                        
+                    segs.append(seg)
                     segs.append(AudioSegment.silent(duration=350))
                 progress.progress((i+1)/len(script))
             
@@ -376,6 +413,7 @@ with tab4:
                 status.text("Mixing...")
                 final = sum(segs)
                 
+                # Music Logic
                 bg_seg = None
                 try:
                     if bg_source == "Presets" and selected_bg_url:
