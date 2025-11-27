@@ -50,17 +50,48 @@ if not st.session_state.authenticated:
 # ================= UTILS & SCRAPERS =================
 
 def get_youtube_id(url):
-    regex = r"(?:v=|\/)([0-9A-Za-z_-]{11}).*"
-    match = re.search(regex, url)
-    return match.group(1) if match else None
+    """
+    Robust YouTube ID extractor. 
+    Handles: standard url, short url, embed, and mobile.
+    """
+    # Pattern covers: youtube.com/watch?v=ID, youtu.be/ID, youtube.com/embed/ID
+    patterns = [
+        r'(?:v=|\/)([0-9A-Za-z_-]{11}).*',
+        r'(?:embed\/)([0-9A-Za-z_-]{11})',
+        r'(?:youtu\.be\/)([0-9A-Za-z_-]{11})'
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+            
+    return None
 
 def get_youtube_transcript(video_id):
+    """
+    Fetches transcript. Returns None if it fails so we don't hallucinate.
+    """
     try:
-        transcript = YouTubeTranscriptApi.get_transcript(video_id)
-        text = " ".join([t['text'] for t in transcript])
+        # Try to get manual transcripts first, fallback to auto-generated
+        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        
+        # Prioritize English, but accept any available
+        try:
+            transcript = transcript_list.find_generated_transcript(['en'])
+        except:
+            # If no english, just take the first available
+            transcript = transcript_list[0]
+            
+        # Fetch the actual data
+        data = transcript.fetch()
+        text = " ".join([t['text'] for t in data])
         return text
+        
     except Exception as e:
-        return f"Error: Could not retrieve transcript. {e}"
+        # Log this to console so you can debug in Streamlit Manage App
+        print(f"YouTube Error: {e}")
+        return None
 
 def scrape_website(url):
     try:
@@ -71,7 +102,7 @@ def scrape_website(url):
             script.decompose()
         return soup.get_text()
     except Exception as e:
-        return f"Error scraping site: {e}"
+        return None
 
 def extract_text_from_files(files):
     text = ""
@@ -109,22 +140,20 @@ def generate_audio_openai(client, text, voice, filename, speed=1.0):
 with st.sidebar:
     st.title("🎛️ Studio Settings")
     
-    # 1. API & Security
     api_key = st.secrets.get("OPENAI_API_KEY")
     if not api_key:
         api_key = st.text_input("OpenAI API Key", type="password")
     
-    privacy_mode = st.toggle("🛡️ Privacy Mode", value=True, help="If on, source text is deleted immediately after script generation.")
+    privacy_mode = st.toggle("🛡️ Privacy Mode", value=False, help="If on, source text is deleted immediately after script generation.")
     
     st.divider()
 
-    # 2. Content Settings
     st.subheader("🌍 Content")
     language = st.selectbox("Output Language", ["English", "Spanish", "French", "German", "Japanese", "Portuguese", "Hindi"])
     
     length_option = st.select_slider(
         "Duration", 
-        options=["Short (2 min)", "Medium (5 min)", "Long (15 min)"],
+        options=["Short (2 min)", "Medium (5 min)", "Long (15 min)", "Extra Long (30 min)"],
         value="Short (2 min)"
     )
 
@@ -165,6 +194,7 @@ with tab1:
     
     final_text = ""
     
+    # --- INPUT LOGIC ---
     if input_type == "📂 Upload Files":
         files = st.file_uploader("Upload Documents", accept_multiple_files=True)
         if files: final_text = extract_text_from_files(files)
@@ -173,7 +203,11 @@ with tab1:
         url = st.text_input("Enter Article URL")
         if url: 
             with st.spinner("Scraping website..."):
-                final_text = scrape_website(url)
+                scraped = scrape_website(url)
+                if scraped:
+                    final_text = scraped
+                else:
+                    st.error("Could not scrape this website. It might be blocked.")
                 
     elif input_type == "📺 YouTube Video":
         yt_url = st.text_input("Enter YouTube URL")
@@ -181,36 +215,41 @@ with tab1:
             vid = get_youtube_id(yt_url)
             if vid:
                 with st.spinner("Fetching transcript..."):
-                    final_text = get_youtube_transcript(vid)
+                    transcript = get_youtube_transcript(vid)
+                    if transcript:
+                        final_text = transcript
+                        st.success("Transcript fetched successfully!")
+                    else:
+                        st.error("❌ Could not retrieve transcript. The video might not have captions, or the server was blocked.")
             else:
                 st.error("Invalid YouTube URL")
                 
     elif input_type == "📝 Paste Text":
         final_text = st.text_area("Paste Content", height=300)
 
+    # --- TEXT PREVIEW (DEBUGGING) ---
+    if final_text:
+        with st.expander("👁️ View Extracted Source Text (Verify this before generating!)"):
+            st.text_area("Source Preview", final_text, height=200, disabled=True)
+
+    # --- GENERATE BUTTON ---
     if st.button("Generate Script", type="primary"):
         if not api_key:
             st.error("Missing API Key")
-        elif len(final_text) < 100:
-            st.error("Content is too short or empty.")
+        elif not final_text or len(final_text) < 100:
+            st.error("⚠️ No valid source text found. Please check the 'View Source Text' box above to ensure content was loaded.")
         else:
             try:
                 client = OpenAI(api_key=api_key)
                 
-                # Determine Length Instructions
+                # Determine Length Instructions (Updated Logic)
                 length_instr = "12-15 exchanges (approx 2-3 mins). Keep it punchy."
-                
                 if "Medium" in length_option:
-                    length_instr = "30 exchanges. Go deep into details. Use analogies to explain complex points."
+                    length_instr = "30 exchanges. Go deep into details. Use analogies."
                 elif "Long" in length_option:
-                    # FORCE VERBOSITY
-                    length_instr = """
-                    At least 50 exchanges. This must be a Deep Dive. 
-                    Do not summarize quickly. 
-                    Host 2 should ask for specific examples. 
-                    Host 1 should give long, detailed explanations. 
-                    Expand on every point in the source text significantly.
-                    """
+                    length_instr = "At least 50 exchanges. Deep Dive. Do not summarize quickly. Expand on every point."
+                elif "Extra Long" in length_option:
+                    length_instr = "80-100 exchanges (approx 30 mins). Very detailed, comprehensive analysis."
 
                 prompt = f"""
                 Create a podcast script based on the source text.
@@ -247,11 +286,10 @@ with tab1:
                         response_format={"type": "json_object"}
                     )
                     st.session_state.script_data = json.loads(res.choices[0].message.content)
-                    st.success("Script Generated!")
+                    st.success("Script Generated! Go to Tab 2.")
                     
                     if privacy_mode:
                         final_text = "" 
-                        del final_text
                         
             except Exception as e:
                 st.error(f"Error: {e}")
@@ -328,4 +366,3 @@ with tab3:
                     with open(out_file, "rb") as f:
                         st.download_button("💾 Download MP3", f, "podcast_master.mp3")
                     status.success("Production Complete!")
-
